@@ -1986,10 +1986,10 @@ def _count_agent_status(mux: HerdrManager) -> dict[str, int]:
 async def test_watch_events_skips_reprime_after_idle_refresh(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """TASK-13: an idle interval with an unchanged mapping is genuinely
-    quiet: the stream is kept open (no reconnect) and the per-pane
-    agent_status re-prime is skipped (one herdr fork per pane per refresh,
-    measured ~2.6 calls/s)."""
+    """TASK-13: a quiet interval with an unchanged mapping keeps the stream
+    open (no reconnect, no per-pane agent_status re-prime; measured ~2.6
+    herdr calls/s before this). The pushed event arriving on the SAME stream
+    after several idle intervals is the proof the subscription survived."""
     monkeypatch.setattr(herdr_module, "_STREAM_REPRIME_INTERVAL", 0.05)
     record = _agent(pane_id="w7:p4", tab_id="w7:t3")
     mux = _manager(
@@ -2004,16 +2004,21 @@ async def test_watch_events_skips_reprime_after_idle_refresh(
     async def stream(_subs: Sequence[Mapping[str, object]]):
         connects["n"] += 1
         yield {"__subscribed__": True}
-        await _hang_forever()  # idle: let the refresh timeouts fire and pass
+        await asyncio.sleep(0.15)  # quiet: spans several patched intervals
+        yield {
+            "event": "pane.agent_status_changed",
+            "data": {"pane_id": "w7:p4", "agent_status": "idle"},
+        }
+        await _hang_forever()
 
     mux._open_stream = stream
     watcher = mux.watch_events([_target()])
     try:
         first = await asyncio.wait_for(anext(watcher), 1)
         assert first.kind == "agent_status"  # first connect reprimes
-        # Several idle intervals pass with an unchanged mapping: the watcher
-        # keeps the same stream open and never re-primes.
-        await asyncio.sleep(0.2)
+        second = await asyncio.wait_for(anext(watcher), 2)
+        assert second.status is not None and second.status.state == "idle"
+        assert second.pane_id == "w7:p4"
     finally:
         await watcher.aclose()
     assert connects["n"] == 1

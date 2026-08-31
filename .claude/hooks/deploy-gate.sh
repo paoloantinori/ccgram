@@ -18,24 +18,23 @@ tool_name=$(printf '%s' "$input" | sed -n 's/.*"tool_name"[[:space:]]*:[[:space:
 [ "$tool_name" = "Bash" ] || exit 0
 
 command_str=$(printf '%s' "$input" | sed -n 's/.*"command"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)
-[ -n "$command_str" ] || exit 0
 
 # Deploy patterns for THIS project. Match loosely: the deploy shows up inside
-# compound commands too.
-case "$command_str" in
-  *"uv tool install"*|*"systemctl"*"ccgram.service"*|*"systemctl --user restart ccgram"*)
-    ;;
-  *)
-    exit 0
-    ;;
-esac
+# compound commands too. The systemctl pattern covers the plain, sudo, --user,
+# and .service restart forms (CLAUDE.md documents `systemctl restart ccgram`).
+is_deploy_pattern() {
+  case "$1" in
+    *"uv tool install"*|*"systemctl"*"restart"*"ccgram"*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
 
-# Unparseable/escaped JSON can defeat the sed above; also try a crude grep so
-# a quoted deploy command cannot slip through unnoticed.
-if ! printf '%s' "$command_str" | grep -qE 'uv tool install|systemctl.*ccgram'; then
-  if printf '%s' "$input" | grep -q 'uv tool install\|systemctl.*ccgram'; then
-    command_str="uv tool install (detected via raw input)"
-  fi
+# The sed capture is lossy: JSON-escaped quotes truncate it (`systemctl
+# restart "ccgram"` parses as `systemctl restart \`) and a mangled payload can
+# defeat it entirely. Whenever the parsed command does not match, re-check the
+# raw input so a deploy cannot slip through on a parse artifact.
+if ! is_deploy_pattern "$command_str"; then
+  printf '%s' "$input" | grep -qE 'uv tool install|systemctl.*restart.*ccgram' || exit 0
 fi
 
 if [ ! -f "$STAMP" ]; then

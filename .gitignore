@@ -87,6 +87,9 @@ progress*.txt
 .gitnexus/
 pkg/mod/
 
+# DoD deploy stamp (per-HEAD, transient; created by scripts/dod.sh)
+.claude/.dod-stamp
+
 # Dev run lock
 .ccgram-dev-run.lock.d/
 
