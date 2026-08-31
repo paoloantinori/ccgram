@@ -18,7 +18,7 @@ REVIEWED=0
 [ "${1:-}" = "--reviewed" ] && REVIEWED=1
 
 echo "== mechanical battery =="
-uv run --extra dev python -m pytest tests/ccgram -q --ignore=tests/ccgram/integration
+uv run --extra dev python -m pytest tests/ccgram -q
 make lint
 PYRIGHT_PYTHON_FORCE_VERSION=latest uv run --extra dev pyright src/ccgram
 uv run --extra dev ruff format --check src/ccgram tests/ccgram
