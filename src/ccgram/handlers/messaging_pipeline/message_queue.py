@@ -529,6 +529,19 @@ async def _coalesce_status_updates(
     return selected, dropped
 
 
+def _track_reaction_target(
+    chat_id: int, task: "ContentTask", part: str, message_id: int
+) -> None:
+    """Register a sent content message as reaction-triggerable."""
+    if not task.window_id:
+        return
+    # Lazy: reactions_trigger top-imports toolbar_keyboard, whose tree
+    # circles back here; import at the send site.
+    from ..reactions_trigger import track_sent_message
+
+    track_sent_message(chat_id, message_id, task.window_id, part, task.thread_id)
+
+
 async def _handle_content_task(
     client: TelegramClient,
     user_id: int,
@@ -1010,6 +1023,7 @@ async def _process_content_task(
             )
             if converted_msg_id is not None:
                 last_msg_id = converted_msg_id
+                _track_reaction_target(chat_id, task, part, converted_msg_id)
                 continue
         else:
             first_part = False
@@ -1020,6 +1034,7 @@ async def _process_content_task(
 
         if sent:
             last_msg_id = sent.message_id
+            _track_reaction_target(chat_id, task, part, sent.message_id)
         else:
             # The sender exhausted its entity/plain fallback without raising.
             # A transcript watermark must treat that as a terminal failure.
