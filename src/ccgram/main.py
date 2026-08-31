@@ -316,7 +316,7 @@ def run_bot() -> None:
     application = create_bot()
     _install_signal_handlers(loop)
     application.run_polling(
-        allowed_updates=["message", "callback_query"],
+        allowed_updates=["message", "callback_query", "message_reaction"],
         stop_signals=None,
     )
 

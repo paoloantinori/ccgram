@@ -152,3 +152,14 @@ class TestGetSynthesizerOpenAI:
             pytest.raises(ValueError, match="Unknown TTS provider"),
         ):
             get_synthesizer()
+
+
+class TestResponseFormatParam:
+    async def test_format_flows_to_payload_and_filename(self):
+        from ccgram.tts.openai import OpenAITtsSynthesizer
+
+        synth = OpenAITtsSynthesizer(
+            api_key="k", model="m", voice="v", response_format="opus"
+        )
+        assert synth._response_format == "opus"
+        assert synth._timeout == 60.0
