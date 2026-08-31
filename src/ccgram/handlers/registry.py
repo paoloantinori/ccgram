@@ -20,7 +20,6 @@ from telegram.ext import (
     CommandHandler,
     InlineQueryHandler,
     MessageHandler,
-    MessageReactionHandler,
     filters,
 )
 from telegram.ext._utils.types import HandlerCallback
@@ -39,7 +38,6 @@ from .file_handler import handle_document_message, handle_photo_message
 from .inline import inline_query_handler, unsupported_content_handler
 from .live import live_command, panes_command, screenshot_command
 from .messaging_pipeline import toolcalls_command, verbose_command
-from .reactions_trigger import handle_reaction_update
 from .last_reply import last_command
 from .recovery import restore_command, resume_command
 from .recovery.history import history_command
@@ -153,10 +151,6 @@ def register_all(
     application.add_handler(
         MessageHandler(filters.Document.ALL & group_filter, handle_document_message)
     )
-
-    # Reaction-triggered actions: no [reactions] table in toolbar.toml
-    # means the handler returns before doing any work.
-    application.add_handler(MessageReactionHandler(handle_reaction_update))
     application.add_handler(
         MessageHandler(filters.VOICE & group_filter, handle_voice_message)
     )

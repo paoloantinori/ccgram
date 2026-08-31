@@ -22,6 +22,8 @@ from typing import TYPE_CHECKING
 
 import structlog
 
+from .extensions import resolved_allowed_updates
+
 if TYPE_CHECKING:
     from aiohttp import web
 
@@ -316,7 +318,7 @@ def run_bot() -> None:
     application = create_bot()
     _install_signal_handlers(loop)
     application.run_polling(
-        allowed_updates=["message", "callback_query", "message_reaction"],
+        allowed_updates=resolved_allowed_updates(["message", "callback_query"]),
         stop_signals=None,
     )
 

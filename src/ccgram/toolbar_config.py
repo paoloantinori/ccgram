@@ -259,11 +259,6 @@ class ToolbarConfig:
 
     layouts: dict[str, ToolbarLayout] = field(default_factory=dict)
     actions: dict[str, ToolbarAction] = field(default_factory=dict)
-    # Reaction-triggered actions: the optional [reactions] table in the
-    # same TOML (emoji -> action name). Empty means reaction triggers are
-    # off. ``reaction_speak`` carries the optional [reactions.speak] options.
-    reaction_map: dict[str, str] = field(default_factory=dict)
-    reaction_speak: dict[str, str] = field(default_factory=dict)
 
     def for_provider(self, provider_name: str) -> ToolbarLayout:
         """Return the layout for ``provider_name``, falling back to claude."""
@@ -456,42 +451,5 @@ def load_toolbar_config(path: str | Path | None = None) -> ToolbarConfig:
         return cfg
     # User actions first so providers can reference them.
     _apply_user_actions(cfg, raw)
-    _apply_reactions(cfg, raw)
     _apply_user_layouts(cfg, raw)
     return cfg
-
-
-def _apply_reactions(cfg: ToolbarConfig, raw: dict) -> None:
-    """Parse the optional ``[reactions]`` table (emoji -> action)."""
-    section = raw.get("reactions")
-    if not isinstance(section, dict):
-        return
-    speak = section.pop("speak", None)
-    if isinstance(speak, dict):
-        # Strings and numeric scalars (timeout = 60 reads natural in TOML);
-        # anything else is skipped loudly like malformed entries above.
-        cfg.reaction_speak = {}
-        for k, v in speak.items():
-            if isinstance(v, str | int | float) and not isinstance(v, bool):
-                cfg.reaction_speak[str(k)] = str(v)
-            else:
-                logger.warning("reactions.speak: skipping non-scalar option %r", k)
-    for emoji, name in section.items():
-        if not isinstance(emoji, str) or not isinstance(name, str):
-            logger.warning("reactions: skipping malformed entry %r", emoji)
-            continue
-        if name in ("screenshot", "speak"):
-            cfg.reaction_map[emoji] = name
-            continue
-        action = cfg.actions.get(name)
-        if action is None or action.action_type not in ("key", "text"):
-            # Rejected at load, not mid-reaction: builtin-typed actions
-            # need a CallbackQuery and cannot run from a reaction.
-            logger.warning(
-                "reactions: %r maps to %r which is missing or not a"
-                " key/text action (ignored)",
-                emoji,
-                name,
-            )
-            continue
-        cfg.reaction_map[emoji] = name
