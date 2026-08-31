@@ -153,9 +153,17 @@ _SEND_ENTER_DELAY_SECONDS = 0.5
 # Event-stream reconnect backoff (seconds): exponential, capped.
 _STREAM_BACKOFF_BASE = 1.0
 _STREAM_BACKOFF_MAX = 30.0
-# A live stream has no locator-change notification. Re-prime periodically so a
-# target that moved to another pane receives a fresh per-pane subscription.
-_STREAM_REPRIME_INTERVAL = 5.0
+# A live stream has no locator-change notification. Refresh the subscription
+# when no event arrives for this long, so a target that moved to another pane
+# gets a fresh per-pane subscription. Digest moves are also caught within ~2s
+# by the supervisor's bound-set restart, so this only covers pane moves the
+# bound set cannot see; a moved target's blind spot is bounded by this
+# interval plus one reconnect, after which the cycle re-primes (TASK-13).
+_STREAM_REPRIME_INTERVAL = 30.0
+# Bound for the connect + ack read (the first anext runs them lazily): a
+# socket that accepts but never acks must be refreshed on the old 5s cadence,
+# not on the idle interval.
+_STREAM_ACK_TIMEOUT = 5.0
 
 
 def _workspace_cwd_from_panes(
@@ -1498,15 +1506,22 @@ class HerdrManager:
         Subscribes to global ``tab.closed`` plus per-pane
         ``pane.agent_status_changed`` for the active panes of *window_ids*
         (agent-status subscriptions require a pane id). Reprimes each pane's
-        current status once the subscription is live (on the ``SUBSCRIBED``
-        sentinel, so a status change during reprime is buffered, not lost), then
-        yields translated events until the stream drops and reconnects with
-        backoff. Cancelling the iterator closes the socket. The watched set is
-        fixed per call: herdr cannot add subscriptions to a live connection, so
-        the consumer restarts this iterator with a new set when bindings change.
+        current status once the subscription is live, but only after a cycle
+        that actually lost coverage: a transport failure, a server EOF, the
+        first connection, or a mapping move (the moved pane's events went to
+        a subscription this stream never held). A refresh that finds the
+        mapping unchanged was genuinely quiet, so the re-prime is skipped:
+        one agent_status fork per pane per refresh is pure subprocess load
+        (measured ~2.6 herdr calls/s sustained at 17 windows, TASK-13).
+        Yields translated events until the stream drops and reconnects with
+        backoff. Cancelling the iterator closes the socket. The watched set
+        is fixed per call: herdr cannot add subscriptions to a live
+        connection, so the consumer restarts this iterator with a new set
+        when bindings change.
         """
         ids = list(window_ids)
         backoff = _STREAM_BACKOFF_BASE
+        reprime = True
         while True:
             pane_to_window, tab_to_windows = await self._resolve_event_targets(ids)
             subscriptions: list[Mapping[str, object]] = [
@@ -1522,42 +1537,64 @@ class HerdrManager:
                 ),
             ]
             refresh_subscriptions = False
+            refresh_moved = False
+            ack_phase = True
             try:
                 async with contextlib.aclosing(
                     self._open_stream(subscriptions)
                 ) as stream:
-                    pending_event: asyncio.Task[dict] | None = None
-                    try:
-                        while True:
-                            if pending_event is None:
-                                pending_event = asyncio.create_task(anext(stream))
-                            done, _ = await asyncio.wait(
-                                {pending_event}, timeout=_STREAM_REPRIME_INTERVAL
-                            )
-                            if not done:
-                                # Keep the socket read pending while checking
-                                # whether pane-specific subscriptions changed.
-                                (
-                                    fresh_panes,
-                                    fresh_tabs,
-                                ) = await self._resolve_event_targets(ids)
-                                if (
-                                    fresh_panes != pane_to_window
-                                    or fresh_tabs != tab_to_windows
-                                ):
-                                    refresh_subscriptions = True
-                                    break
-                                continue
-                            try:
-                                obj = pending_event.result()
-                            except StopAsyncIteration:
-                                pending_event = None
+                    while True:
+                        try:
+                            async with asyncio.timeout(
+                                _STREAM_ACK_TIMEOUT
+                                if ack_phase
+                                else _STREAM_REPRIME_INTERVAL
+                            ):
+                                # anext(stream) bare would raise
+                                # StopAsyncIteration on a server EOF, which
+                                # PEP 479 turns into RuntimeError inside this
+                                # async generator; the default converts EOF
+                                # into the graceful backoff path below.
+                                obj = await anext(stream, None)
+                        except TimeoutError:
+                            if ack_phase:
+                                # The handshake never completed: a connection
+                                # failure, not a healthy refresh. Fall through
+                                # to the backoff path so the eventual connect
+                                # re-primes (the first prime never ran).
                                 break
-                            pending_event = None
-                            if is_subscribed_sentinel(obj):
-                                # Subscription is live — reprime now so the status
-                                # cache isn't cold. Events are buffered meanwhile.
-                                backoff = _STREAM_BACKOFF_BASE
+                            # No event may arrive after a target moves because
+                            # Herdr subscriptions are pane-specific. Silence
+                            # alone proves nothing about a target that moved:
+                            # check the mapping. An unchanged one means the
+                            # quiet was real, so keep the same stream (no
+                            # reconnect, no re-prime); a moved one re-subscribes
+                            # and re-primes (TASK-13 review).
+                            (
+                                fresh_panes,
+                                fresh_tabs,
+                            ) = await self._resolve_event_targets(ids)
+                            if (
+                                fresh_panes == pane_to_window
+                                and fresh_tabs == tab_to_windows
+                            ):
+                                continue
+                            refresh_moved = True
+                            refresh_subscriptions = True
+                            break
+                        if obj is None:
+                            # Server closed the stream: treat as a coverage
+                            # loss, not a healthy refresh.
+                            break
+                        if is_subscribed_sentinel(obj):
+                            # Subscription is live: the ack phase is over
+                            # (later reads wait on the idle interval, not the
+                            # ack timeout), and reprime runs when the previous
+                            # cycle lost coverage, so the status cache isn't
+                            # cold after a real drop or a pane move.
+                            ack_phase = False
+                            backoff = _STREAM_BACKOFF_BASE
+                            if reprime:
                                 for pane_id, window_id in pane_to_window.items():
                                     status = await self.agent_status(window_id)
                                     if status is not None:
@@ -1567,47 +1604,61 @@ class HerdrManager:
                                             pane_id=pane_id,
                                             status=status,
                                         )
-                                continue
-                            # Resolve terminal events through the pre-refresh guard:
-                            # a fresh snapshot cannot contain a closed locator.
-                            guarded_terminal_events = tuple(
-                                event
-                                for event in translate_event(
-                                    obj, pane_to_window, tab_to_windows
-                                )
-                                if event.kind == "window_died"
+                            continue
+                        # Terminal events identify the pane/tab that just vanished.
+                        # Resolve and emit them through the pre-refresh guard: a
+                        # fresh snapshot cannot contain the closed locator, so
+                        # refreshing first would silently drop the close event.
+                        guarded_terminal_events = tuple(
+                            event
+                            for event in translate_event(
+                                obj, pane_to_window, tab_to_windows
                             )
-                            if guarded_terminal_events:
-                                for event in guarded_terminal_events:
-                                    yield event
-                                continue
-                            # Status events may reveal a moved agent. Reconnect before
-                            # translating them if the guarded mapping changed.
-                            fresh_panes, fresh_tabs = await self._resolve_event_targets(
-                                ids
-                            )
-                            if (
-                                fresh_panes != pane_to_window
-                                or fresh_tabs != tab_to_windows
-                            ):
-                                refresh_subscriptions = True
-                                break
+                            if event.kind == "window_died"
+                        )
+                        if guarded_terminal_events:
+                            for event in guarded_terminal_events:
+                                yield event
+                            continue
+                        # Agent locators can move while a stream is open. Herdr does
+                        # not support incremental subscription updates, so refresh
+                        # the guarded mapping and reconnect before translating status
+                        # events whenever a move is observed. The triggering
+                        # event is delivered under the pre-refresh mapping first
+                        # (the same guard terminal events use): the move must
+                        # not drop a concurrent status update, and with the
+                        # re-prime skipped on unmoved mappings nothing else
+                        # would recover it (TASK-13 review).
+                        fresh_panes, fresh_tabs = await self._resolve_event_targets(ids)
+                        if (
+                            fresh_panes != pane_to_window
+                            or fresh_tabs != tab_to_windows
+                        ):
                             for event in translate_event(
                                 obj, pane_to_window, tab_to_windows
                             ):
                                 yield event
-                    finally:
-                        if pending_event is not None:
-                            pending_event.cancel()
-                            await asyncio.gather(pending_event, return_exceptions=True)
+                            refresh_moved = True
+                            refresh_subscriptions = True
+                            break
+                        for event in translate_event(
+                            obj, pane_to_window, tab_to_windows
+                        ):
+                            yield event
             except OSError as exc:
                 logger.debug("herdr event stream error: %s", exc)
             if refresh_subscriptions:
-                # A mapping change is a healthy re-subscription, not a transport
-                # failure; do not penalize it with exponential backoff.
+                # A healthy re-subscription, not a transport failure: no
+                # backoff. The re-prime is skipped only when the mapping is
+                # unchanged (the quiet was real); a move opened a blind
+                # window on the new pane's subscription, so the next cycle
+                # re-primes (TASK-13 review).
+                reprime = refresh_moved
                 continue
-            # Clean EOF or socket error → back off, then reconnect with the full
-            # set (incremental subscribe is unsupported) and reprime.
+            # Clean EOF or socket error → coverage was lost: back off, then
+            # reconnect with the full set (incremental subscribe is
+            # unsupported) and reprime.
+            reprime = True
             await asyncio.sleep(backoff)
             backoff = min(backoff * 2, _STREAM_BACKOFF_MAX)
 
