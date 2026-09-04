@@ -4,7 +4,7 @@ The bot operates exclusively in Telegram Forum (topics) mode. No `active_session
 
 ## 1 Topic = 1 Window = 1 Session
 
-Topic ID (Telegram) → Window ID (tmux `@id`) via `thread_bindings` in `state.json`.
+Topic ID (Telegram) → Window ID (herdr session digest / tmux `@id`) via `chat_thread_bindings` in `state.json` (chat-scoped since v4.9; the legacy `thread_bindings` key stays empty after migration).
 Window ID → Session ID (Claude) via `session_map.json` (written by hook).
 
 Window IDs (e.g. `@0`, `@12`) are unique within a tmux server session. Window names are display labels in `window_display_names`.
@@ -14,11 +14,11 @@ Window IDs (e.g. `@0`, `@12`) are unique within a tmux server session. Window na
 In `session.py: SessionManager`:
 
 ```python
-thread_bindings: dict[int, dict[int, str]]  # user_id → {thread_id → window_id}
+chat_thread_bindings: dict[(user_id, chat_id, thread_id), str]  # → window_id
 window_display_names: dict[str, str]        # window_id → window_name
 ```
 
-Storage: memory + `state.json`. Written when user creates a session via the directory browser in a topic. Purpose: route user messages to the correct tmux window.
+Storage: memory + `state.json` (persisted as flat `"user:chat:thread"` keys). Written when the user creates a session via the directory browser in a topic. Private chats that carry topic metadata are tracked in `private_topic_chats` (v4.9.4+). Purpose: route user messages to the correct tmux window.
 
 ## Mapping 2: Window ID → Session
 
@@ -53,7 +53,7 @@ Outbound (user → Claude):
 
 ```
 User sends "hello" in topic (thread_id=42)
-  → thread_bindings[user_id][42] → "@0"
+  → chat_thread_bindings[(user, chat, 42)] → "@0"
   → send_to_window("@0", "hello")   # resolves via find_window_by_id
 ```
 
@@ -61,7 +61,7 @@ Inbound (Claude → user):
 
 ```
 SessionMonitor reads new message (session_id = "uuid-xxx")
-  → Iterate thread_bindings, find (user, thread) whose window_id maps to this session
+  → Iterate chat_thread_bindings, find the (user, chat, thread) whose window_id maps to this session
   → Deliver to that thread_id
 ```
 
