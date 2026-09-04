@@ -2158,12 +2158,59 @@ async def test_idle_refresh_reprimes_when_mapping_changed(
     assert calls["n"] == 2
 
 
+async def test_watch_events_debounces_busy_stream_move_checks(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """TASK-13 follow-up: on a busy stream the per-event mapping check is
+    rate-limited to one agent-list fork per _MOVE_CHECK_MIN_INTERVAL, not
+    one per status event; events themselves are all delivered."""
+    record = _agent(pane_id="w7:p4", tab_id="w7:t3")
+    mux = _manager(
+        _live_fake(record).on(
+            "pane", "get", out=_result(pane={"agent_status": "working"})
+        )
+    )
+    resolves = {"n": 0}
+    real_resolve = mux._resolve_event_targets
+
+    async def counting_resolve(ids):
+        resolves["n"] += 1
+        return await real_resolve(ids)
+
+    monkeypatch.setattr(mux, "_resolve_event_targets", counting_resolve)
+
+    async def stream(_subs):
+        yield {"__subscribed__": True}
+        for i in range(3):
+            yield {
+                "event": "pane.agent_status_changed",
+                "data": {"pane_id": "w7:p4", "agent_status": "idle"},
+            }
+        await _hang_forever()
+
+    mux._open_stream = stream
+    watcher = mux.watch_events([_target()])
+    try:
+        first = await asyncio.wait_for(anext(watcher), 1)
+        assert first.kind == "agent_status"
+        for _ in range(3):
+            evt = await asyncio.wait_for(anext(watcher), 1)
+            assert evt.kind == "agent_status" and evt.pane_id == "w7:p4"
+    finally:
+        await watcher.aclose()
+    # Cycle-start resolve only: the three quick events were all inside the
+    # debounce window (the sentinel stamps it fresh).
+    assert resolves["n"] == 1
+
+
 async def test_mapping_change_refresh_delivers_triggering_event(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """TASK-13 review: the event that reveals a move is delivered under the
-    pre-refresh mapping (the terminal-event guard), and the reconnect
-    re-primes the newly subscribed pane."""
+    """
+    TASK-13 review: the event that reveals a move is delivered under the
+        pre-refresh mapping (the terminal-event guard), and the reconnect
+        re-primes the newly subscribed pane."""
+    monkeypatch.setattr(herdr_module, "_MOVE_CHECK_MIN_INTERVAL", 0.0)
     monkeypatch.setattr(herdr_module, "_STREAM_BACKOFF_BASE", 0.01)
     before = _agent(pane_id="w7:p4", tab_id="w7:t3")
     after = _agent(pane_id="w7:p5", tab_id="w7:t3")

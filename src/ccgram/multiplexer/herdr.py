@@ -37,6 +37,7 @@ import hashlib
 import json
 import os
 import re
+import time
 import shutil
 import subprocess
 from collections.abc import (
@@ -166,6 +167,12 @@ _STREAM_REPRIME_INTERVAL = 30.0
 # all is a connection failure, and waiting the full backoff cap to call it
 # one is acceptable (TASK-13 review).
 _STREAM_ACK_TIMEOUT = 30.0
+# Minimum wall-clock spacing between per-event mapping checks on a busy
+# stream. The check costs one agent-list fork per non-terminal event;
+# without a floor, a chatty cycle checks on every status change. Moves
+# are still caught within this bound on busy streams and within the idle
+# interval on quiet ones (TASK-13 follow-up).
+_MOVE_CHECK_MIN_INTERVAL = 5.0
 
 
 def _workspace_cwd_from_panes(
@@ -1550,6 +1557,7 @@ class HerdrManager:
             ]
             refresh_subscriptions = False
             ack_phase = True
+            last_move_check = 0.0
             try:
                 async with contextlib.aclosing(
                     self._open_stream(subscriptions)
@@ -1611,8 +1619,20 @@ class HerdrManager:
                                 # re-prime the status cache now.
                                 ack_phase = False
                                 backoff = _STREAM_BACKOFF_BASE
-                                for pane_id, window_id in pane_to_window.items():
-                                    status = await self.agent_status(window_id)
+                                # The cycle's mapping was resolved at its
+                                # top (up to an ack bound before this
+                                # sentinel): start the debounce clock here.
+                                # A move inside that window is still caught:
+                                # the stale subscription goes quiet and the
+                                # unconditional idle check fires.
+                                last_move_check = time.monotonic()
+                                panes = list(pane_to_window.items())
+                                statuses = await asyncio.gather(
+                                    *(self.agent_status(w) for _, w in panes)
+                                )
+                                for (pane_id, window_id), status in zip(
+                                    panes, statuses, strict=True
+                                ):
                                     if status is not None:
                                         yield MuxEvent(
                                             kind="agent_status",
@@ -1646,11 +1666,14 @@ class HerdrManager:
                                 obj, pane_to_window, tab_to_windows
                             ):
                                 yield event
-                            if await self._targets_moved(
-                                ids, pane_to_window, tab_to_windows
-                            ):
-                                refresh_subscriptions = True
-                                break
+                            now = time.monotonic()
+                            if now - last_move_check >= _MOVE_CHECK_MIN_INTERVAL:
+                                last_move_check = now
+                                if await self._targets_moved(
+                                    ids, pane_to_window, tab_to_windows
+                                ):
+                                    refresh_subscriptions = True
+                                    break
                     finally:
                         # Cancel any still-pending read and await its unwinding BEFORE
                         # aclosing closes the stream: closing a generator that still
