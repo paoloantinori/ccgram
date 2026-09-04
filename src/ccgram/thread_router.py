@@ -29,6 +29,7 @@ from dataclasses import dataclass
 import structlog
 from collections.abc import Callable, Iterator
 from typing import Any, cast
+from .extensions import emit as extensions_emit
 
 logger = structlog.get_logger()
 
@@ -436,6 +437,18 @@ class ThreadRouter:
         chat_id: int | None = None,
     ) -> None:
         """Bind a topic, using chat-scoped identity when ``chat_id`` is known."""
+        # Extension seam domain event (docs/extension-seam.md): fires on
+        # EVERY bind path (creation, discovery adoption, recovery, resume,
+        # rebind), unlike any single caller. Payload is plain data; the
+        # window's cwd is resolved by listeners from persisted state.
+        extensions_emit(
+            "topic.bound",
+            user_id=user_id,
+            chat_id=chat_id,
+            thread_id=thread_id,
+            window_id=window_id,
+            window_name=window_name,
+        )
         if chat_id is not None:
             self._bind_chat_scoped(user_id, chat_id, thread_id, window_id)
         else:
