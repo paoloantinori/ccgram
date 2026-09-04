@@ -2,7 +2,7 @@
 
 ccgram: Telegram bot that bridges Telegram Forum topics to AI coding agent sessions (Claude Code, Codex, Gemini, Pi) via tmux or herdr multiplexers. Each topic is bound to one multiplexer window running one agent session.
 
-Tech stack: Python 3.14, python-telegram-bot, uv. This checkout is a working fork: branch `port-4.6` = upstream main (alexei-led/ccgram) + our additive features. Keep it rebased onto upstream; divergence is only our features, never rewrites of his code.
+Tech stack: Python 3.14, python-telegram-bot, uv. This checkout is a working fork: branch `fork/main` = upstream main (alexei-led/ccgram) + our additive features. Keep it rebased onto upstream; divergence is only our features, never rewrites of his code.
 
 ## Common Commands
 
@@ -48,7 +48,7 @@ Core carries ONE loader (`src/ccgram/extensions.py`) plus three integration line
 
 ## Upstream flow
 
-We file issues upstream (alexei-led/ccgram); the maintainer merges selected PRs (ours and others') and cuts frequent releases. When his releases land: cherry-pick/rebase port-4.6 onto upstream main, drop our superseded duplicates, keep our additive features and the extension seam intact (verify seam files byte-identical after every integration). Plan and status live in `backlog/docs/upstream-pr-plan.md`; work items in `backlog/tasks/` (Backlog.md format, managed via the `backlog` CLI).
+We file issues upstream (alexei-led/ccgram); the maintainer merges selected PRs (ours and others') and cuts frequent releases. When his releases land: cherry-pick/rebase fork/main onto upstream main, drop our superseded duplicates, keep our additive features and the extension seam intact (verify seam files byte-identical after every integration). Plan and status live in `backlog/docs/upstream-pr-plan.md`; work items in `backlog/tasks/` (Backlog.md format, managed via the `backlog` CLI).
 
 **Never open a PR, issue or comment upstream without explicit user approval first.** Drafts get discussed together before anything is posted.
 
