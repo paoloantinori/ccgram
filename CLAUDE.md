@@ -33,11 +33,11 @@ After restart, verify the journal shows `extension loaded: main` (no line = the 
 
 ## Extension seam (fork features live out of tree)
 
-Core carries ONE loader (`src/ccgram/extensions.py`) plus three integration lines (bot.py `load_extensions`, main.py `resolved_allowed_updates`, two `emit("message.delivered", ...)` in message_queue). Everything else fork-side lives in the separate repo `~/data/repo/apps/ccgram-ext` (package `ccgram-ext`, entry-point group `ccgram.extensions`, currently: reaction-triggered actions). Design: `docs/extension-seam.md`.
+Core carries ONE loader (`src/ccgram/extensions.py`) plus four integration lines (bot.py `load_extensions`, main.py `resolved_allowed_updates`, two `emit("message.delivered", ...)` in message_queue, one `emit("topic.bound", ...)` in window_launch_service). Everything else fork-side lives in the separate repo `~/data/repo/apps/ccgram-ext` (package `ccgram-ext`, entry-point group `ccgram.extensions`, PUBLIC at github.com/paoloantinori/ccgram-ext; features: reaction-triggered actions, topic identity icons with the `/icons` retroactive pass). Design: `docs/extension-seam.md`.
 
 - New fork features go in ccgram-ext, never in files upstream actively develops.
 - The `[reactions]` / `[reactions.speak]` sections of `~/.ccgram/toolbar.toml` are consumed by the ext, not by core. No table = feature inert.
-- The `[topic-icons]` section in toolbar.toml is DORMANT config: the identity-icon feature (#197) was not re-ported after the v4.9 reset. Do not assume it works.
+- The `[topic-icons]` section in toolbar.toml feeds the ext's identity icons (explicit map, opt-in `heuristics = true` with deterministic hash fallback); `/icons` applies them retroactively. Telegram only accepts its fixed forum icon set, so emojis outside it are skipped at apply time.
 
 ## Core Design Constraints
 

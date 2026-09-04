@@ -53,6 +53,13 @@ class TestLoad:
             "message",
             "message_reaction",
         ]
+        # Duplicate claims (e.g. "message" for a CommandHandler) dedup.
+        ext._registered_update_types.add("message")
+        assert ext.resolved_allowed_updates(["message", "callback_query"]) == [
+            "message",
+            "callback_query",
+            "message_reaction",
+        ]
 
     def test_broken_extension_isolated(self):
         def fake_eps(group):

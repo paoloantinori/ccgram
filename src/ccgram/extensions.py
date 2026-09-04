@@ -7,7 +7,7 @@ environment declare::
     main = "my_package:register"
 
 and expose ``register(api: ExtensionApi) -> None``. The core's entire
-commitment is this module plus the three integration lines documented in
+commitment is this module plus the four integration lines documented in
 the design note; everything else a feature needs it takes through the
 ``ExtensionApi`` surface or ccgram's public modules.
 
@@ -74,8 +74,14 @@ def load_extensions(add_handler: Callable[[BaseHandler], None]) -> int:
 
 
 def resolved_allowed_updates(base: list[str]) -> list[str]:
-    """Merge extension-claimed update types into the base list."""
-    return [*base, *_registered_update_types]
+    """Merge extension-claimed update types into the base list.
+
+    Order-preserving dedup: an extension may legitimately claim an update
+    type the base already lists (a CommandHandler claims "message"), and
+    getUpdates should receive each type once.
+    """
+    merged = [*base, *_registered_update_types]
+    return list(dict.fromkeys(merged))
 
 
 def emit(event: str, **payload: Any) -> None:

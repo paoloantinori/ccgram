@@ -33,15 +33,19 @@ Core integration points (the ENTIRE permanent merge debt):
 3. `message_queue.py`: two `emit("message.delivered", chat_id=, message_id=,
    window_id=, text=, thread_id=)` calls at the delivery sites (fresh send
    and edit-convert) replacing any feature-specific tracking.
+4. `window_launch_service.py`: one `emit("topic.bound", user_id=, chat_id=,
+   thread_id=, window_id=, window_name=, cwd=)` after the creation bind.
 
-Domain events (v1): `message.delivered` only. Events are observation
-hooks: payload fields are add-only; listeners must tolerate extras.
+Domain events (v1): `message.delivered` (queue delivery sites) and
+`topic.bound` (window_launch_service, after the creation bind). Events are
+observation hooks: payload fields are add-only; listeners must tolerate extras.
 
 ## ccgram-ext (separate repo)
 
 - pyproject declares `[project.entry-points."ccgram.extensions"]
   main = "ccgram_ext:register"`.
-- Contains: reaction-triggered actions (issue #195, upstream not-planned):
+- Contains: reaction-triggered actions (issue #195) and topic identity
+icons (issue #197), both upstream not-planned. Reactions:
   PTB MessageReactionHandler + own LRU fed by `message.delivered`, own
   reading of the `[reactions]` / `[reactions.speak]` sections from the
   same `~/.ccgram/toolbar.toml`, self-contained OpenAI-compatible TTS
