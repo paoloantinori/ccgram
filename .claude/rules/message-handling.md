@@ -32,7 +32,7 @@ Dedup: worker compares `last_text` on status updates; identical content skips th
 ## Performance
 
 - mtime cache: monitoring loop maintains in-memory mtime cache, skips reads for unchanged files.
-- Byte offsets: each tracked session records `last_byte_offset`, reads only new content. File truncation (offset > size) detected; offset auto-resets.
+- Byte offsets: each tracked session records `last_byte_offset`, reads only new content. File truncation (offset > size) detected; offset auto-resets. Offsets are *delivered watermarks*: settled receipt prefixes commit incrementally (not queue-idle-only, since upstream #205/#207); unsettled receipts replay after a restart.
 
 ## No Truncation
 
