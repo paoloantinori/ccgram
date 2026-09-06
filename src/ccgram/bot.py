@@ -247,11 +247,14 @@ def create_bot() -> Application:
     )
 
     application.add_error_handler(_error_handler)
-    register_all(application, _group_filter)
 
     # Extension seam (docs/extension-seam.md): out-of-tree packages
-    # register PTB handlers + domain-event listeners. Runs before
-    # run_polling captures allowed_updates.
+    # register PTB handlers + domain-event listeners. MUST run before
+    # register_all: PTB dispatches only the first matching handler per
+    # group, so extension commands have to precede the core command
+    # catch-all or they are swallowed by it. Still before run_polling
+    # captures allowed_updates.
     load_extensions(application.add_handler)
+    register_all(application, _group_filter)
 
     return application

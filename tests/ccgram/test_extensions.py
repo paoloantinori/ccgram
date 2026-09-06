@@ -104,3 +104,29 @@ class TestEmit:
 
     def test_no_listeners_noop(self):
         ext.emit("nobody.home", anything=1)
+
+
+class TestLoadOrder:
+    def test_extension_handlers_precede_core_catch_all(self, monkeypatch):
+        """PTB runs only the FIRST matching handler per group: extension
+        commands must be registered before core's command-forwarding
+        catch-all or they are swallowed (regression: /names swallowed)."""
+        import ccgram.bot as botmod
+
+        added = []
+
+        class FakeEp:
+            name = "main"
+
+            @staticmethod
+            def load():
+                return lambda api: added.append(api)
+
+        import ccgram.extensions as extmod
+
+        monkeypatch.setattr(extmod, "entry_points", lambda group=None: [FakeEp()])
+        monkeypatch.setattr(botmod, "register_all", lambda app, f: added.append("core"))
+        monkeypatch.setenv("CCGRAM_BOT_TOKEN", "123:dummy")
+        app = botmod.create_bot()
+        # The fake extension registered first, core handlers second.
+        assert added[0] != "core" and added[-1] == "core"
