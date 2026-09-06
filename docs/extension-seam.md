@@ -33,11 +33,12 @@ Core integration points (the ENTIRE permanent merge debt):
 3. `message_queue.py`: two `emit("message.delivered", chat_id=, message_id=,
    window_id=, text=, thread_id=)` calls at the delivery sites (fresh send
    and edit-convert) replacing any feature-specific tracking.
-4. `window_launch_service.py`: one `emit("topic.bound", user_id=, chat_id=,
+4. `thread_router.py`: one `emit("topic.bound", user_id=, chat_id=,
    thread_id=, window_id=, window_name=, cwd=)` after the creation bind.
 
 Domain events (v1): `message.delivered` (queue delivery sites) and
-`topic.bound` (window_launch_service, after the creation bind). Events are
+`topic.bound` (thread_router.bind_thread, the single seam that sees every
+bind path: creation, discovery adoption, recovery, resume, rebind). Events are
 observation hooks: payload fields are add-only; listeners must tolerate extras.
 
 ## ccgram-ext (separate repo)

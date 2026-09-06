@@ -33,7 +33,7 @@ After restart, verify the journal shows `extension loaded: main` (no line = the 
 
 ## Extension seam (fork features live out of tree)
 
-Core carries ONE loader (`src/ccgram/extensions.py`) plus four integration lines (bot.py `load_extensions`, main.py `resolved_allowed_updates`, two `emit("message.delivered", ...)` in message_queue, one `emit("topic.bound", ...)` in window_launch_service). Everything else fork-side lives in the separate repo `~/data/repo/apps/ccgram-ext` (package `ccgram-ext`, entry-point group `ccgram.extensions`, PUBLIC at github.com/paoloantinori/ccgram-ext; features: reaction-triggered actions, topic identity icons with the `/icons` retroactive pass). Design: `docs/extension-seam.md`.
+Core carries ONE loader (`src/ccgram/extensions.py`) plus four integration lines (bot.py `load_extensions`, main.py `resolved_allowed_updates`, two `emit("message.delivered", ...)` in message_queue, one `emit("topic.bound", ...)` at the top of thread_router.bind_thread (every bind path)). Everything else fork-side lives in the separate repo `~/data/repo/apps/ccgram-ext` (package `ccgram-ext`, entry-point group `ccgram.extensions`, PUBLIC at github.com/paoloantinori/ccgram-ext; features: reaction-triggered actions, topic identity icons with the `/icons` retroactive pass). Design: `docs/extension-seam.md`.
 
 - New fork features go in ccgram-ext, never in files upstream actively develops.
 - The `[reactions]` / `[reactions.speak]` sections of `~/.ccgram/toolbar.toml` are consumed by the ext, not by core. No table = feature inert.
