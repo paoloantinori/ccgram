@@ -769,7 +769,9 @@ class TestUnknownAgentStateDoesNotClearTheMarker:
         assert handled is True, "the message must not be forwarded to the pane"
         assert lifecycle_strategy.is_dead_notified(100, 42, "@0")
         mock_router.unbind_thread.assert_not_called()
-        mock_sync_provider.assert_not_awaited()        assert "nothing confirms an agent" in mock_reply.await_args[0][1]
+        mock_sync_provider.assert_not_awaited()
+        assert mock_reply.await_args is not None
+        assert "nothing confirms an agent" in mock_reply.await_args[0][1]
 
     @pytest.mark.parametrize("pane_command", ["claude", "codex"])
     async def test_a_named_agent_still_clears_the_marker(
