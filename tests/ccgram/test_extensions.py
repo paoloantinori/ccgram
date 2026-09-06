@@ -127,6 +127,6 @@ class TestLoadOrder:
         monkeypatch.setattr(extmod, "entry_points", lambda group=None: [FakeEp()])
         monkeypatch.setattr(botmod, "register_all", lambda app, f: added.append("core"))
         monkeypatch.setenv("CCGRAM_BOT_TOKEN", "123:dummy")
-        app = botmod.create_bot()
+        botmod.create_bot()
         # The fake extension registered first, core handlers second.
         assert added[0] != "core" and added[-1] == "core"
