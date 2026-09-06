@@ -136,7 +136,7 @@ def test_backlog_status_reports_count_age_lag_and_throttles() -> None:
 
 async def test_purge_refuses_rebound_topic_before_draining() -> None:
     user_id = 702
-    queue: asyncio.Queue = asyncio.Queue()
+    queue = mq._ShardedUserQueue()
     mq._message_queues[user_id] = queue
     mq._queue_locks[user_id] = asyncio.Lock()
     queue.put_nowait(
@@ -162,7 +162,7 @@ async def test_purge_refuses_rebound_topic_before_draining() -> None:
 
 async def test_purge_is_source_scoped_and_settles_only_retired_receipts() -> None:
     user_id = 701
-    queue: asyncio.Queue = asyncio.Queue()
+    queue = mq._ShardedUserQueue()
     mq._message_queues[user_id] = queue
     mq._queue_locks[user_id] = asyncio.Lock()
     retired = mq.DeliveryReceipt(checkpoint=50)
