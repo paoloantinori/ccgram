@@ -11,6 +11,7 @@ from telegramify_markdown import utf16_len
 
 from ccgram.delivery_contract import DeliveryOutcome
 from ccgram.handlers.messaging_pipeline.message_queue import (
+    _ShardedUserQueue,
     MERGE_MAX_LENGTH,
     _can_merge_tasks,
     _coalesce_status_updates,
@@ -589,7 +590,7 @@ class TestMessageQueueWorker:
             [WindowRef(window_id="@1", window_name="live", cwd="/tmp")],
             tracked_window_ids=["@0"],
         )
-        mq._message_queues[user_id] = asyncio.Queue()
+        mq._message_queues[user_id] = mq._ShardedUserQueue()
         mq._queue_locks[user_id] = asyncio.Lock()
         receipt = mq.DeliveryReceipt()
         receipt.track()
@@ -626,7 +627,7 @@ class TestMessageQueueWorker:
             [WindowRef(window_id="@0", window_name="live", cwd="/tmp")],
             tracked_window_ids=["@0"],
         )
-        mq._message_queues[user_id] = asyncio.Queue()
+        mq._message_queues[user_id] = mq._ShardedUserQueue()
         mq._queue_locks[user_id] = asyncio.Lock()
         receipt = mq.DeliveryReceipt()
         receipt.track()
@@ -678,7 +679,7 @@ class TestMessageQueueWorker:
             [WindowRef(window_id="live", window_name="live", cwd="/tmp")],
             tracked_window_ids=["closed", "live"],
         )
-        mq._message_queues[user_id] = asyncio.Queue()
+        mq._message_queues[user_id] = mq._ShardedUserQueue()
         mq._queue_locks[user_id] = asyncio.Lock()
         receipts: list[mq.DeliveryReceipt] = []
         q = mq._message_queues[user_id]
@@ -829,7 +830,7 @@ class TestMessageQueueWorker:
         from ccgram.handlers.messaging_pipeline import message_queue as mq
 
         user_id = 88007
-        mq._message_queues[user_id] = asyncio.Queue()
+        mq._message_queues[user_id] = mq._ShardedUserQueue()
         mq._queue_locks[user_id] = asyncio.Lock()
         receipt = mq.DeliveryReceipt()
         receipt.track()
@@ -885,7 +886,7 @@ class TestMessageQueueWorker:
 
         user_id = 88015
         task = ContentTask(window_id="closed", parts=("stale",), thread_id=42)
-        mq._message_queues[user_id] = asyncio.Queue()
+        mq._message_queues[user_id] = mq._ShardedUserQueue()
         mq._message_queues[user_id].put_nowait(task)
         mq._stale_drop_log_last_at.clear()
         try:
@@ -912,7 +913,7 @@ class TestMessageQueueWorker:
 
         user_id = 88012
         task = ContentTask(window_id="@0", parts=("blocked",), thread_id=42)
-        mq._message_queues[user_id] = asyncio.Queue()
+        mq._message_queues[user_id] = mq._ShardedUserQueue()
         mq._message_queues[user_id].put_nowait(
             ContentTask(window_id="@0", parts=("waiting",), thread_id=42)
         )
@@ -941,7 +942,7 @@ class TestMessageQueueWorker:
         from ccgram.handlers.messaging_pipeline import message_queue as mq
 
         user_id = 88003
-        mq._message_queues[user_id] = asyncio.Queue()
+        mq._message_queues[user_id] = mq._ShardedUserQueue()
         mq._queue_locks[user_id] = asyncio.Lock()
         receipt = mq.DeliveryReceipt()
         receipt.track()
@@ -995,7 +996,7 @@ class TestMessageQueueWorker:
         from telegram.error import TelegramError
 
         user_id = 88000
-        mq._message_queues[user_id] = asyncio.Queue()
+        mq._message_queues[user_id] = mq._ShardedUserQueue()
         mq._queue_locks[user_id] = asyncio.Lock()
         receipt = mq.DeliveryReceipt()
         receipt.track()
@@ -1065,7 +1066,7 @@ class TestMessageQueueWorker:
         from ccgram.handlers.messaging_pipeline import message_queue as mq
 
         user_id = 87999
-        mq._message_queues[user_id] = asyncio.Queue()
+        mq._message_queues[user_id] = mq._ShardedUserQueue()
         mq._queue_locks[user_id] = asyncio.Lock()
         q = mq._message_queues[user_id]
         q.put_nowait(_content_task("hello"))
@@ -1096,7 +1097,7 @@ class TestMessageQueueWorker:
         from ccgram.handlers.messaging_pipeline import message_queue as mq
 
         user_id = 87998
-        mq._message_queues[user_id] = asyncio.Queue()
+        mq._message_queues[user_id] = mq._ShardedUserQueue()
         mq._queue_locks[user_id] = asyncio.Lock()
         receipt = mq.DeliveryReceipt()
         receipt.track()
@@ -1128,7 +1129,7 @@ class TestMessageQueueWorker:
         from ccgram.handlers.messaging_pipeline import message_queue as mq
 
         user_id = 87997
-        mq._message_queues[user_id] = asyncio.Queue()
+        mq._message_queues[user_id] = mq._ShardedUserQueue()
         mq._queue_locks[user_id] = asyncio.Lock()
         receipts = [mq.DeliveryReceipt(), mq.DeliveryReceipt()]
         tasks = []
@@ -1167,7 +1168,7 @@ class TestMessageQueueWorker:
         from ccgram.handlers.messaging_pipeline import message_queue as mq
 
         user_id = 87998
-        mq._message_queues[user_id] = asyncio.Queue()
+        mq._message_queues[user_id] = mq._ShardedUserQueue()
         mq._queue_locks[user_id] = asyncio.Lock()
         receipts = [mq.DeliveryReceipt(), mq.DeliveryReceipt()]
         for text, receipt in zip(("first", "second"), receipts, strict=True):
@@ -1212,7 +1213,7 @@ class TestMessageQueueWorker:
         from ccgram.handlers.messaging_pipeline import message_queue as mq
 
         user_id = 88011
-        mq._message_queues[user_id] = asyncio.Queue()
+        mq._message_queues[user_id] = mq._ShardedUserQueue()
         mq._queue_locks[user_id] = asyncio.Lock()
         receipts = [mq.DeliveryReceipt(), mq.DeliveryReceipt()]
         for text, receipt in zip(("first", "second"), receipts, strict=True):
@@ -1271,7 +1272,7 @@ class TestMessageQueueWorker:
         from ccgram.handlers.messaging_pipeline import message_queue as mq
 
         user_id = 88004
-        mq._message_queues[user_id] = asyncio.Queue()
+        mq._message_queues[user_id] = mq._ShardedUserQueue()
         mq._queue_locks[user_id] = asyncio.Lock()
         receipts = [mq.DeliveryReceipt(), mq.DeliveryReceipt()]
         for receipt in receipts:
@@ -1321,7 +1322,7 @@ class TestMessageQueueWorker:
         from ccgram.handlers.messaging_pipeline import message_queue as mq
 
         user_id = 88005
-        mq._message_queues[user_id] = asyncio.Queue()
+        mq._message_queues[user_id] = mq._ShardedUserQueue()
         mq._queue_locks[user_id] = asyncio.Lock()
         receipts = [mq.DeliveryReceipt(), mq.DeliveryReceipt()]
         for receipt in receipts:
@@ -1365,7 +1366,7 @@ class TestMessageQueueWorker:
         from telegram.error import TelegramError
 
         user_id = 88001
-        _message_queues[user_id] = asyncio.Queue()
+        _message_queues[user_id] = _ShardedUserQueue()
         _queue_locks[user_id] = asyncio.Lock()
         q = _message_queues[user_id]
         q.put_nowait(_content_task("hello"))
@@ -1392,7 +1393,7 @@ class TestMessageQueueWorker:
         )
 
         user_id = 88002
-        _message_queues[user_id] = asyncio.Queue()
+        _message_queues[user_id] = _ShardedUserQueue()
         _queue_locks[user_id] = asyncio.Lock()
         q = _message_queues[user_id]
         q.put_nowait(_content_task("hello"))
@@ -1419,7 +1420,7 @@ class TestMessageQueueWorker:
         )
 
         user_id = 88003
-        _message_queues[user_id] = asyncio.Queue()
+        _message_queues[user_id] = _ShardedUserQueue()
         _queue_locks[user_id] = asyncio.Lock()
         worker = asyncio.create_task(_message_queue_worker(bot, user_id))
         try:
@@ -1739,3 +1740,111 @@ class TestShutdownDrain:
             new=AsyncMock(side_effect=block_dispatch),
         ):
             await asyncio.wait_for(shutdown_workers(drain_timeout=0.3), timeout=5.0)
+
+
+class TestShardedRoundRobin:
+    """TASK-30 acceptance: fair interleaving across windows, strict FIFO
+    within each window, ledger balance."""
+
+    def _task(self, window: str, tag: str) -> ContentTask:
+        return ContentTask(window_id=window, parts=(tag,), role="assistant")
+
+    async def test_small_windows_finish_despite_huge_sibling(self):
+        q = _ShardedUserQueue()
+        for i in range(60):
+            q.put_nowait(self._task("big", f"b{i}"))
+        q.put_nowait(self._task("s1", "x1"))
+        q.put_nowait(self._task("s1", "x2"))
+        q.put_nowait(self._task("s2", "y1"))
+        order = []
+        for _ in range(12):
+            t = await q.get()
+            assert isinstance(t, ContentTask)
+            order.append(t.parts[0])
+            q.task_done()
+        # The two small windows complete inside the first three rotation
+        # passes regardless of the 60-task sibling.
+        assert "x1" in order and "x2" in order and "y1" in order
+        assert order.count("b0") + order.count("b1") >= 1  # big progresses
+
+    async def test_per_window_fifo_order_preserved(self):
+        q = _ShardedUserQueue()
+        for i in range(5):
+            q.put_nowait(self._task("A", f"a{i}"))
+            q.put_nowait(self._task("B", f"b{i}"))
+        got_a, got_b = [], []
+        for _ in range(10):
+            t = await q.get()
+            assert isinstance(t, ContentTask)
+            q.task_done()
+            (got_a if t.parts[0].startswith("a") else got_b).append(t.parts[0])
+        assert got_a == ["a0", "a1", "a2", "a3", "a4"]
+        assert got_b == ["b0", "b1", "b2", "b3", "b4"]
+
+    async def test_ledger_join_balances_through_merge_and_drain(self):
+        q = _ShardedUserQueue()
+        for t in ("m1", "m2", "m3"):
+            q.put_nowait(self._task("W", t))
+        q.put_nowait(self._task("V", "v1"))
+        # Simulate the drain/re-enqueue compensation cycle.
+        items = []
+        while not q.empty():
+            items.append(q.get_nowait())
+        for item in items:
+            q.put_nowait(item)
+            q.task_done(item)
+        assert q.qsize() == len(items)
+        for _ in items:
+            t = await q.get()
+            q.task_done()
+        await asyncio.wait_for(q.join(), 1)
+
+
+class TestReviewFixes:
+    async def test_backlog_snapshot_sees_facade_pending(self):
+        from ccgram.handlers.messaging_pipeline.message_queue import (
+            _get_backlog_snapshot,
+        )
+
+        q = _ShardedUserQueue()
+        for i in range(5):
+            q.put_nowait(
+                ContentTask(
+                    window_id="W",
+                    parts=(f"t{i}",),
+                    role="assistant",
+                    source_session_id="sess",
+                )
+            )
+        from ccgram.handlers.messaging_pipeline.message_queue import (
+            _message_queues,
+        )
+
+        _message_queues[70001] = q
+        try:
+            snap = _get_backlog_snapshot(70001, "W", None)
+        finally:
+            _message_queues.pop(70001, None)
+        assert snap is not None and snap.pending_count == 5
+
+    async def test_merge_drains_own_window_despite_foreign_shard(self):
+        from ccgram.handlers.messaging_pipeline.message_queue import (
+            _merge_content_tasks,
+        )
+
+        q = _ShardedUserQueue()
+        lock = asyncio.Lock()
+        q.put_nowait(
+            ContentTask(window_id="W", parts=("m2",), role="assistant", chat_id=1)
+        )
+        q.put_nowait(
+            ContentTask(
+                window_id="OLD", parts=("foreign",), role="assistant", chat_id=1
+            )
+        )
+        first = ContentTask(window_id="W", parts=("m1",), role="assistant", chat_id=1)
+        merged, count = await _merge_content_tasks(q, first, lock)
+        # The same-window sibling merges even with a foreign shard present;
+        # the foreign item must stay queued untouched.
+        assert count == 1, f"merge_count={count}"
+        assert q.qsize() == 1

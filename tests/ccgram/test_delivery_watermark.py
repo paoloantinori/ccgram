@@ -182,14 +182,13 @@ def test_receipt_free_parsed_offset_is_not_committed(tmp_path):
 
 
 async def test_queues_idle_semantics():
-    import asyncio
 
     # No queues at all: idle.
     mq._message_queues.clear()
     mq._inflight_count = 0
     assert mq.queues_idle() is True
 
-    q = mq._message_queues.setdefault(1, asyncio.Queue())
+    q = mq._message_queues.setdefault(1, mq._ShardedUserQueue())
     q.put_nowait(object())  # type: ignore[arg-type]
     assert mq.queues_idle() is False
 

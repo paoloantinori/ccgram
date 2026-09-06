@@ -95,8 +95,135 @@ _QUEUE_RETRY_JITTER_MAX_SECONDS = 1.0
 _QUEUE_RETRY_BUDGET_SECONDS = 300.0
 _QUEUE_RATE_LIMIT_LOG_COOLDOWN_SECONDS = 30.0
 
+
 # Per-user message queues and worker tasks
-_message_queues: dict[int, asyncio.Queue[MessageTask]] = {}
+class _ShardedUserQueue:
+    """Per-user queue sharded by window, drained round-robin (TASK-30).
+
+    One strict FIFO per window preserves every per-window invariant
+    (content order, tool_use -> tool_result pairing, status-after-
+    content); the round-robin picker interleaves WINDOWS so a topic
+    with a huge backlog cannot starve its siblings (2026-09-06
+    incident: one 52MB replay silenced every live topic behind the
+    single per-user FIFO head). The per-user rate limiter is untouched:
+    this changes ORDER, not rate.
+    """
+
+    def __init__(self) -> None:
+        self._shards: dict[str, asyncio.Queue[MessageTask]] = {}
+        self._order: list[str] = []
+        self._rr = 0
+        self._wake = asyncio.Event()
+        self._last: asyncio.Queue[MessageTask] | None = None
+        # Own unfinished ledger: put_nowait +1, every task_done -1. The
+        # per-shard asyncio counters stay untouched for drain/re-enqueue
+        # compensation; join() waits on THIS counter so merged dispatches
+        # and compensations can never wedge it.
+        self._unfinished = 0
+        self._drained = asyncio.Event()
+        self._drained.set()
+
+    def _shard_key(self, task: MessageTask) -> str:
+        return getattr(task, "window_id", "") or ""
+
+    def _shard_for(self, task: MessageTask) -> asyncio.Queue[MessageTask]:
+        key = self._shard_key(task)
+        shard = self._shards.get(key)
+        if shard is None:
+            shard = asyncio.Queue()
+            self._shards[key] = shard
+            self._order.append(key)
+        return shard
+
+    def _pick(self) -> asyncio.Queue[MessageTask] | None:
+        count = len(self._order)
+        for offset in range(count):
+            index = (self._rr + offset) % count
+            shard = self._shards[self._order[index]]
+            if not shard.empty():
+                self._rr = (index + 1) % count
+                return shard
+        return None
+
+    def put_nowait(self, task: MessageTask) -> None:
+        self._shard_for(task).put_nowait(task)
+        self._unfinished += 1
+        self._drained.clear()
+        self._wake.set()
+
+    async def get(self) -> MessageTask:
+        while True:
+            self._wake.clear()
+            shard = self._pick()
+            if shard is not None:
+                task = shard.get_nowait()
+                self._last = shard
+                return task
+            await self._wake.wait()
+
+    def task_done(self, task: MessageTask | None = None) -> None:
+        # No-arg form settles the shard of the last get() (worker path);
+        # passing the task settles the shard it was re-enqueued into
+        # (drain/re-enqueue compensation paths). Both decrement the facade
+        # ledger: it is the join() authority.
+        if task is not None:
+            self._shard_for(task).task_done()
+        elif self._last is not None:
+            self._last.task_done()
+        self._unfinished -= 1
+        if self._unfinished <= 0:
+            self._unfinished = 0
+            self._drained.set()
+
+    def get_nowait(self) -> MessageTask:
+        """Non-blocking pick (round-robin), for tests and drain helpers."""
+        shard = self._pick()
+        if shard is None:
+            raise asyncio.QueueEmpty
+        task = shard.get_nowait()
+        self._last = shard
+        return task
+
+    def pending_items(self) -> list[MessageTask]:
+        """Queued-but-undelivered tasks across shards (snapshot helper).
+
+        The backlog snapshot used to reach into asyncio.Queue._queue on
+        the single FIFO; on sharded queues the equivalent view is the
+        concatenation of the shards' internal deques (read-only).
+        """
+        items: list[MessageTask] = []
+        for key in self._order:
+            items.extend(self._shards[key]._queue)  # noqa: SLF001  # pyright: ignore[reportAttributeAccessIssue]
+        return items
+
+    def drain_window(self, window_id: str) -> list[MessageTask]:
+        """Drain ONLY this window's shard, preserving its FIFO order.
+
+        Merging is same-window by contract; draining the whole user
+        queue instead would concatenate foreign shards in creation
+        order and abort the merge scan at the first foreign item.
+        """
+        key = window_id or ""
+        shard = self._shards.get(key)
+        if shard is None:
+            return []
+        items: list[MessageTask] = []
+        while not shard.empty():
+            items.append(shard.get_nowait())
+        return items
+
+    def empty(self) -> bool:
+        return all(shard.empty() for shard in self._shards.values())
+
+    def qsize(self) -> int:
+        return sum(shard.qsize() for shard in self._shards.values())
+
+    async def join(self) -> None:
+        await self._drained.wait()
+
+
+_AnyUserQueue = _ShardedUserQueue | asyncio.Queue[MessageTask]
+_message_queues: dict[int, _ShardedUserQueue] = {}
 _queue_workers: dict[int, asyncio.Task[None]] = {}
 _queue_locks: dict[int, asyncio.Lock] = {}  # Protect drain/refill operations
 
@@ -128,7 +255,11 @@ def _get_backlog_snapshot(
     if queue is not None:
         tasks.extend(
             task
-            for task in getattr(queue, "_queue", ())
+            for task in (
+                queue.pending_items()
+                if isinstance(queue, _ShardedUserQueue)
+                else getattr(queue, "_queue", ())  # pyright: ignore[reportAttributeAccessIssue]
+            )
             if isinstance(task, ContentTask)
             and task.window_id == window_id
             and thread_key(task.thread_id) == tkey
@@ -197,12 +328,12 @@ async def purge_source_tasks(
                 and task.source_checkpoint <= snapshot_offset
             ):
                 removed.append(task)
-                queue.task_done()
+                _q_task_done(queue, task)
             else:
                 retained.append(task)
         for task in retained:
             queue.put_nowait(task)
-            queue.task_done()
+            _q_task_done(queue, task)
     for task in removed:
         for receipt in task.delivery_receipts:
             receipt.settle(DeliveryOutcome.INTENTIONALLY_DROPPED)
@@ -316,20 +447,18 @@ async def _send_tts_voice(
     return True
 
 
-def get_message_queue(user_id: int) -> asyncio.Queue[MessageTask] | None:
+def get_message_queue(user_id: int) -> "_ShardedUserQueue | None":
     """Get the message queue for a user (if exists)."""
     return _message_queues.get(user_id)
 
 
-def get_or_create_queue(
-    client: TelegramClient, user_id: int
-) -> asyncio.Queue[MessageTask]:
+def get_or_create_queue(client: TelegramClient, user_id: int) -> "_ShardedUserQueue":
     """Get or create message queue and worker for a user.
 
     Also detects dead workers and respawns them so messages are not lost.
     """
     if user_id not in _message_queues:
-        _message_queues[user_id] = asyncio.Queue()
+        _message_queues[user_id] = _ShardedUserQueue()
         _queue_locks[user_id] = asyncio.Lock()
 
     # Respawn dead workers (can happen if an uncaught exception killed the task)
@@ -343,17 +472,39 @@ def get_or_create_queue(
     return _message_queues[user_id]
 
 
-def _drain_queue(queue: asyncio.Queue[MessageTask]) -> list[MessageTask]:
-    """Drain all items from the queue and return them as a list.
+def _q_task_done(queue: "_AnyUserQueue", task: MessageTask | None = None) -> None:
+    """task_done that targets the task's shard on sharded queues.
+
+    Tests and some callers pass a plain asyncio.Queue; the no-arg form
+    there is the only correct one.
+    """
+    if isinstance(queue, _ShardedUserQueue):
+        # Direct call: a blanket rewrite once pointed this branch at
+        # itself (infinite recursion, caught by the worker-repro).
+        queue.task_done(task)
+    else:
+        queue.task_done()
+
+
+def _drain_queue(queue: "_AnyUserQueue") -> list[MessageTask]:
+    """Drain all items from every shard and return them as a list.
 
     Destructive: the queue is empty after this call. Caller is responsible
-    for re-enqueueing any items that should not be discarded.
+    for re-enqueueing any items that should not be discarded. Per-window
+    relative order is preserved (shards drain in creation order, each FIFO);
+    re-enqueueing routes each task back to its own shard, restoring the
+    same per-window sequences.
     """
     items: list[MessageTask] = []
+    if isinstance(queue, _ShardedUserQueue):
+        for key in queue._order:
+            shard = queue._shards[key]
+            while not shard.empty():
+                items.append(shard.get_nowait())
+        return items
     while not queue.empty():
         try:
-            item = queue.get_nowait()
-            items.append(item)
+            items.append(queue.get_nowait())
         except asyncio.QueueEmpty:
             break
     return items
@@ -406,7 +557,7 @@ def _can_merge_tasks(base: ContentTask, candidate: MessageTask) -> bool:
 
 
 async def _merge_content_tasks(
-    queue: asyncio.Queue[MessageTask],
+    queue: _AnyUserQueue,
     first: ContentTask,
     lock: asyncio.Lock,
 ) -> tuple[ContentTask, int]:
@@ -428,7 +579,11 @@ async def _merge_content_tasks(
     merge_count = 0
 
     async with lock:
-        items = _drain_queue(queue)
+        items = (
+            queue.drain_window(first.window_id or "")
+            if isinstance(queue, _ShardedUserQueue)
+            else _drain_queue(queue)
+        )
         remaining: list[MessageTask] = []
 
         for i, task in enumerate(items):
@@ -460,7 +615,7 @@ async def _merge_content_tasks(
 
         for item in remaining:
             queue.put_nowait(item)
-            queue.task_done()
+            _q_task_done(queue, item)
 
     if merge_count == 0:
         return first, 0
@@ -485,7 +640,7 @@ async def _merge_content_tasks(
 
 
 async def _coalesce_status_updates(
-    queue: asyncio.Queue[MessageTask],
+    queue: _AnyUserQueue,
     first: StatusUpdateTask,
     lock: asyncio.Lock,
     user_id: int | None = None,
@@ -525,7 +680,7 @@ async def _coalesce_status_updates(
 
         for item in remaining:
             queue.put_nowait(item)
-            queue.task_done()
+            _q_task_done(queue, item)
 
     return selected, dropped
 
@@ -534,7 +689,7 @@ async def _handle_content_task(
     client: TelegramClient,
     user_id: int,
     task: ContentTask,
-    queue: asyncio.Queue[MessageTask],
+    queue: _AnyUserQueue,
     lock: asyncio.Lock,
     dispatch_state: DispatchState | None = None,
 ) -> DispatchResult:
@@ -626,7 +781,7 @@ async def _dispatch(
     client: TelegramClient,
     user_id: int,
     task: MessageTask,
-    queue: asyncio.Queue[MessageTask],
+    queue: _AnyUserQueue,
     lock: asyncio.Lock,
     dispatch_state: DispatchState | None = None,
 ) -> DispatchResult:
@@ -646,8 +801,9 @@ async def _dispatch(
                 # Drop any siblings the coalescer would have consumed so
                 # the next poll cycle sees a clean queue.
                 _, dropped = await _coalesce_status_updates(queue, st, lock, user_id)
+                # Dropped siblings share st's window: settle that shard.
                 for _ in range(dropped):
-                    queue.task_done()
+                    _q_task_done(queue, st)
                 return DispatchResult(0, DeliveryOutcome.INTENTIONALLY_DROPPED)
             await _flush_batch_for_task(user_id, st, client)
             collapsed_task, dropped = await _coalesce_status_updates(
@@ -655,7 +811,7 @@ async def _dispatch(
             )
             if dropped > 0:
                 for _ in range(dropped):
-                    queue.task_done()
+                    _q_task_done(queue, st)
             await process_status_update(client, user_id, collapsed_task)
             return DispatchResult(0, DeliveryOutcome.DELIVERED)
         case StatusClearTask() as cl:
@@ -736,7 +892,7 @@ async def _dispatch_with_retry(
     client: TelegramClient,
     user_id: int,
     state: RetryDispatchState,
-    queue: asyncio.Queue[MessageTask],
+    queue: _AnyUserQueue,
     lock: asyncio.Lock,
 ) -> DeliveryOutcome:
     """Dispatch one task, dropping dead targets and bounding flood retries."""
@@ -818,8 +974,9 @@ async def _dispatch_with_retry(
                         await asyncio.sleep(retry_in)
             finally:
                 structlog.contextvars.clear_contextvars()
+                # Merged extras share the dispatched task's window/shard.
                 for _ in range(dispatch_state.extra_task_done):
-                    queue.task_done()
+                    _q_task_done(queue, state.task)
                 state.merged_receipts = dispatch_state.merged_receipts
         if outcome is not None:
             return outcome
