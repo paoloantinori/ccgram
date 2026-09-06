@@ -1,7 +1,7 @@
 ---
 id: TASK-28
 title: In-memory lineage orphans bindings across bridge restarts
-status: Open
+status: Done
 assignee: []
 created_date: '2026-09-06 16:05'
 updated_date: '2026-09-06 16:05'
@@ -27,3 +27,11 @@ if it recurs: persist supersession aliases into window_states (the
 2026-08 port-4.6-incident manual procedure, automated), or make the
 startup sweep resolve by session_id via session_map before unbinding.
 Any upstream conversation stays on hold per user decision.
+
+FIXED 2026-09-06 (commit 1b012df1): reconcile_window_aliases folds, in
+addition to the in-memory lineage, aliases the persisted session_map
+attests alone (dead digest -> unique live digest on the same full
+(cwd, provider); ambiguous workspaces never fold). Production-proven
+on the deploy restart itself: the hassio binding survived a bridge
+restart with the re-keyed agent, which was exactly the failing
+scenario. Review 4/4 + ambiguity-guard test; battery 7063.
