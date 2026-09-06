@@ -1,7 +1,7 @@
 ---
 id: TASK-29
 title: Cap the replayable backlog per session (kills the eternal-replay loop)
-status: Open
+status: Done
 assignee: []
 created_date: '2026-09-06 20:30'
 updated_date: '2026-09-06 20:30'
@@ -32,3 +32,14 @@ fork debt, same class as the four seam lines). Config-gated
 (CCGRAM_REPLAY_CAP_MB, default on at 1MB; 0 disables).
 Gates: full battery + /simplify + code-review; live verification must
 include a restart with a fabricated >cap gap.
+
+DONE 2026-09-06 (commit 8b295b5e): the trigger, not the machinery. The
+upstream skip barrier (persisted, freeze-at-EOF, one notice, commit on
+ack, retries) was already complete; only its manual status-bar trigger
+died with the outage it cures. Auto-trigger added on both discovery
+paths (direct + fallback), default 1MB via CCGRAM_REPLAY_CAP_MB, 0
+disables. Review: reentrancy with the delivery pipeline verified safe;
+F1 fallback hole, F2 intent guard (a None must not silence), F3 clamp
+all fixed with tests. Deployed 4.10.4.dev21; armed and quiet live (no
+session near the cap). TASK-30 (round-robin) remains the stage-2
+blast-radius fix.
