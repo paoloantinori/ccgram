@@ -34,3 +34,13 @@ Delivered 2026-09-06:
   guards); /simplify inline; battery 7058 + ext 39; pyright 0.
 - Config armed on bird (backups first): CCGRAM_TOPIC_EMOJI=off in
   ~/.ccgram/.env, [topic-names] in toolbar.toml.
+
+LIVE VERIFICATION (2026-09-06, user-confirmed): first attempt exposed a
+real seam bug, PTB dispatches only the FIRST matching handler per
+group, so core's command-forwarding catch-all swallowed every extension
+command (/names answered "Unknown command"; /icons had never actually
+run either). Fixed by loading the seam BEFORE register_all in create_bot
+(commit 3e2b5ab9), proven empirically (fake /names update dispatched to
+the ext recorder) plus a load-order regression test. Second attempt:
+user ran /names in Telegram and it "worked great" (dry-run listing
+delivered). The apply path (/names apply) remains available on demand.
