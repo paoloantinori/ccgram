@@ -1,7 +1,7 @@
 ---
 id: TASK-30
 title: Round-robin fair scheduling across per-topic queues (user proposal)
-status: Open
+status: Done
 assignee: []
 created_date: '2026-09-06 20:30'
 updated_date: '2026-09-06 20:30'
@@ -34,3 +34,12 @@ DESIGN (stage 2 after TASK-29's cap):
 Complementary to TASK-29: cap removes the fuel, this bounds the blast
 radius. Bigger than the cap (one subsystem) but still bounded to
 message_queue.py + tests.
+
+DONE 2026-09-07 (commit 6c9c2907): _ShardedUserQueue facade, one FIFO
+shard per window + round-robin picker; facade-owned unfinished ledger
+as the join authority; backlog snapshot and same-window merge adapted
+(review F1/F2). Stress-probed (9000 concurrent puts, dynamic shards,
+zero loss, ledger balance). Live verification is this very exchange:
+the ccgram topic's messages interleave fairly with any sibling backlo-
+grand the deployed restart itself. Together with TASK-29's cap, both
+recurrence legs of the 2026-09-06 incident are structurally closed.
