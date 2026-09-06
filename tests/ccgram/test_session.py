@@ -1944,14 +1944,37 @@ class TestDurableSessionAliases:
         from ccgram import session as session_mod
 
         sm = tmp_path / "session_map.json"
-        def D(c):
+
+        def digest(c):
             return "herdr:herdr-session-v1-" + c * 64
+
         sm.write_text(
             _json.dumps(
                 {
-                    D("a"): {"schema_version": 1, "session_id": "s1", "cwd": "/a", "window_name": "", "transcript_path": "", "provider_name": "claude"},
-                    D("b"): {"schema_version": 1, "session_id": "s2", "cwd": "/a", "window_name": "", "transcript_path": "", "provider_name": "claude"},
-                    D("d"): {"schema_version": 1, "session_id": "s3", "cwd": "/a", "window_name": "", "transcript_path": "", "provider_name": "claude"},
+                    digest("a"): {
+                        "schema_version": 1,
+                        "session_id": "s1",
+                        "cwd": "/a",
+                        "window_name": "",
+                        "transcript_path": "",
+                        "provider_name": "claude",
+                    },
+                    digest("b"): {
+                        "schema_version": 1,
+                        "session_id": "s2",
+                        "cwd": "/a",
+                        "window_name": "",
+                        "transcript_path": "",
+                        "provider_name": "claude",
+                    },
+                    digest("d"): {
+                        "schema_version": 1,
+                        "session_id": "s3",
+                        "cwd": "/a",
+                        "window_name": "",
+                        "transcript_path": "",
+                        "provider_name": "claude",
+                    },
                 }
             )
         )
@@ -1963,7 +1986,12 @@ class TestDurableSessionAliases:
         monkeypatch.setattr(session_mod, "parse_session_map", fake_parse)
         mgr = self._manager()
         # d is dead, but b and a are two LIVE windows on /a: ambiguous.
-        assert mgr._durable_session_aliases({"herdr-session-v1-" + "a" * 64, "herdr-session-v1-" + "b" * 64}) == {}
+        assert (
+            mgr._durable_session_aliases(
+                {"herdr-session-v1-" + "a" * 64, "herdr-session-v1-" + "b" * 64}
+            )
+            == {}
+        )
 
     def test_unreadable_map_is_silent(self, tmp_path, monkeypatch):
         from ccgram import session as session_mod
