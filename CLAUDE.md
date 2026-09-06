@@ -39,6 +39,10 @@ Core carries ONE loader (`src/ccgram/extensions.py`) plus four integration lines
 - The `[reactions]` / `[reactions.speak]` sections of `~/.ccgram/toolbar.toml` are consumed by the ext, not by core. No table = feature inert.
 - The `[topic-icons]` section in toolbar.toml feeds the ext's identity icons (explicit map, opt-in `heuristics = true` with deterministic hash fallback); `/icons` applies them retroactively. Telegram only accepts its fixed forum icon set, so emojis outside it are skipped at apply time.
 
+## Quiet topic titles (fork policy, 2026-09-06)
+
+`CCGRAM_TOPIC_EMOJI=off` in `~/.ccgram/.env` gates every topic-title write in `handlers/status/topic_emoji.py` (state lives in the status bubble; the title is the user's namespace, ccbot-style). Topic naming is one-shot at bind via ccgram-ext (`[topic-names] style = "ccbot"` in toolbar.toml: cwd basename, counter on collision; `/names` dry-runs, `/names apply` renames all bound topics). With the gate off, the only remaining core title writer is `/sync`.
+
 ## Core Design Constraints
 
 - **1 Topic = 1 Window = 1 Session**: routing keyed by multiplexer window id. On herdr, window ids are `herdr-session-v1-<digest>` session digests (NOT tab/pane ids); the herdr backend is the anti-corruption layer that owns all id translation. Upstream shares this model since v4.9.x (guarded session identity, `WindowRef.topic_eligible` verdict).

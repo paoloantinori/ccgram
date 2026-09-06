@@ -2,6 +2,12 @@ import asyncio
 from contextlib import contextmanager
 from unittest.mock import AsyncMock, MagicMock, patch
 
+from types import SimpleNamespace
+from typing import TYPE_CHECKING, cast
+
+if TYPE_CHECKING:
+    from ccgram.telegram_client import TelegramClient
+
 import pytest
 from telegram.error import BadRequest, RetryAfter, TelegramError
 
@@ -807,3 +813,22 @@ class TestFirstPaintPacing:
 
         assert -100 not in _disabled_chats
         assert _last_chat_edit[-100] == (0.0, (-100, 1))
+
+
+class TestTitleWritesDisabled:
+    async def test_gate_blocks_both_writers(self, monkeypatch):
+        import ccgram.handlers.status.topic_emoji as te
+
+        calls = []
+
+        async def no_edit(**kw):  # pragma: no cover  # type: ignore[override]
+            calls.append(kw)
+            raise AssertionError("no title writes allowed")
+
+        monkeypatch.setattr(te, "_TITLE_WRITES_DISABLED", True)
+        monkeypatch.setattr(te, "_disabled_chats", set())
+        monkeypatch.setattr(te, "_topic_names", {})
+        client = cast("TelegramClient", SimpleNamespace(edit_forum_topic=no_edit))
+        await te.sync_topic_name(client, 1, 2, "any ▸ name")
+        await te.update_topic_emoji(client, 1, 2, "working", "any ▸ name")
+        assert calls == []

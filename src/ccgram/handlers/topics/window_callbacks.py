@@ -36,7 +36,7 @@ from .directory_browser import (
 )
 from ..callback_registry import register
 from ..messaging_pipeline.message_sender import safe_edit, safe_send
-from ..status.topic_emoji import format_topic_name_for_mode
+from ..status.topic_emoji import format_topic_name_for_mode, title_writes_disabled
 from ..user_state import PENDING_THREAD_ID, PENDING_THREAD_TEXT
 
 if TYPE_CHECKING:
@@ -66,6 +66,8 @@ async def _rename_forum_topic(
     client: TelegramClient, chat_id: int, thread_id: int, display: str, window_id: str
 ) -> None:
     """Rename a topic in either a forum or a private topic chat."""
+    if title_writes_disabled():
+        return
     try:
         await client.edit_forum_topic(
             chat_id=chat_id,

@@ -50,7 +50,7 @@ from ..callback_data import (
 from ..callback_helpers import get_thread_id
 from ..callback_tokens import compact_callback_data
 from ..messaging_pipeline.message_sender import safe_edit, safe_send
-from ..status.topic_emoji import format_topic_name_for_mode
+from ..status.topic_emoji import format_topic_name_for_mode, title_writes_disabled
 from ..user_state import (
     PENDING_THREAD_ID,
     PENDING_THREAD_TEXT,
@@ -267,7 +267,7 @@ async def _stale_recovery_offer(old_window_id: str) -> str | None:
     return "That session is running again, so it was left alone."
 
 
-async def _create_and_bind_window(
+async def _create_and_bind_window(  # noqa: C901
     query: CallbackQuery,
     user_id: int,
     thread_id: int,
@@ -363,14 +363,15 @@ async def _create_and_bind_window(
         thread_router.set_group_chat_id(user_id, thread_id, chat.id)
 
     client = PTBTelegramClient(context.bot)
-    try:
-        await client.edit_forum_topic(
-            chat_id=thread_router.resolve_chat_id(user_id, thread_id),
-            message_thread_id=thread_id,
-            name=format_topic_name_for_mode(created_wname, approval_mode),
-        )
-    except TelegramError as e:
-        logger.debug("Failed to rename topic: %s", e)
+    if not title_writes_disabled():
+        try:
+            await client.edit_forum_topic(
+                chat_id=thread_router.resolve_chat_id(user_id, thread_id),
+                message_thread_id=thread_id,
+                name=format_topic_name_for_mode(created_wname, approval_mode),
+            )
+        except TelegramError as e:
+            logger.debug("Failed to rename topic: %s", e)
 
     await safe_edit(query, f"✅ {message}\n\n{success_label}")
 
