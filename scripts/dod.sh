@@ -17,6 +17,11 @@ cd "$(dirname "$0")/.."
 REVIEWED=0
 [ "${1:-}" = "--reviewed" ] && REVIEWED=1
 
+set -e
+# A red battery must abort BEFORE any stamp is written. Without this a
+# failing pytest still flowed into the stamp (live 2026-09-07: stamp
+# issued over a 2-failed run).
+
 echo "== mechanical battery =="
 uv run --extra dev python -m pytest tests/ccgram -q
 make lint
