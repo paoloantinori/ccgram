@@ -319,6 +319,7 @@ _PROVIDER_META: dict[str, tuple[str, str]] = {
     "gemini": ("Gemini", "\u264a"),
     "pi": ("Pi", "\U0001f916"),
     "shell": ("Shell", "\U0001f41a"),
+    "zai": ("Zai", "\U0001f7e3"),
 }
 
 

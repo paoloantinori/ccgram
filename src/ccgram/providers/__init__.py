@@ -33,6 +33,7 @@ _APPROVAL_MODE_YOLO = "yolo"
 _YOLO_FLAGS: dict[str, str] = {
     "antigravity": "--dangerously-skip-permissions",
     "claude": "--dangerously-skip-permissions",
+    "zai": "--dangerously-skip-permissions",
     "codex": "--dangerously-bypass-approvals-and-sandbox",
     "gemini": "--yolo",
 }
@@ -73,12 +74,16 @@ def _ensure_registered() -> None:
     # Lazy: provider classes register against the registry at import; defer until the registry factory runs
     from ccgram.providers.shell import ShellProvider
 
+    # Lazy: fork-only zai variant (claude wrapper, mirrored config dir)
+    from ccgram.providers.zai import ZaiProvider
+
     registry.register("antigravity", AntigravityProvider)
     registry.register("claude", ClaudeProvider)
     registry.register("codex", CodexProvider)
     registry.register("gemini", GeminiProvider)
     registry.register("pi", PiProvider)
     registry.register("shell", ShellProvider)
+    registry.register("zai", ZaiProvider)
     _registered = True
 
 
@@ -191,7 +196,7 @@ def detect_provider_from_command(pane_current_command: str) -> str:
     # Match basename only (first token) to avoid false positives
     # from paths like /home/claude/bin/vim
     basename = os.path.basename(cmd.split()[0])
-    for name in ("antigravity", "claude", "codex", "gemini", "pi"):
+    for name in ("antigravity", "claude", "codex", "gemini", "pi", "zai"):
         if (
             basename == name
             or (name == "antigravity" and basename == "agy")
