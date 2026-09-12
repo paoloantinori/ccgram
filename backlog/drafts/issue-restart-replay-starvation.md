@@ -2,6 +2,7 @@
 
 Target: alexei-led/ccgram, new issue (issue-first per CONTRIBUTING).
 Status: POSTED 2026-09-07 as issue #245 (user-approved).
+
 ---
 
 Title: Restart replay starves live topics under group rate penalty; auto-trigger for the existing skip barrier
