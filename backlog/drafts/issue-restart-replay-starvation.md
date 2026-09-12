@@ -1,7 +1,7 @@
 # Draft issue: restart replay starves live topics under rate penalty
 
 Target: alexei-led/ccgram, new issue (issue-first per CONTRIBUTING).
-Status: DRAFT, awaiting user approval. Do not post without it.
+Status: POSTED 2026-09-07 as issue #245 (user-approved).
 
 ---
 
