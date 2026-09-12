@@ -35,3 +35,20 @@ as official claude also relaunches via zai; --resume reads from the
 wrapped binary's projects dir (the zai mirror), so old official-claude
 sessions may not resume cleanly. If the user hits this, the picker
 feature becomes urgent.
+
+PROVIDER SHIPPED 2026-09-07 (commit in fork/main, deploy 4.10.4.dev33):
+ZaiProvider registered fork-side (providers/zai.py, subclass of
+ClaudeProvider, identity-only override). It now appears in the /new
+provider picker and /agent override; provider_name persistence makes
+resume/recovery relaunch zai. Global env default
+(CCGRAM_CLAUDE_COMMAND=zai) stays as the fallback when no variant is
+chosen. Battery 7083.
+
+UPSTREAM ASSESSMENT (user asked): worth OFFERING, low controversy, but
+the fork shape is zai-specific (hardcoded wrapper). The generic
+upstream pitch: config-declared provider VARIANTS
+(e.g. CCGRAM_PROVIDER_VARIANTS="claude:zai=..."), discovered and
+selectable in the existing picker, default unchanged. Additive,
+opt-in, no default change: passes the user's
+"particularly uncontroversial" filter IF the user ever wants to
+open it. NOT opened: standing approval rule.
