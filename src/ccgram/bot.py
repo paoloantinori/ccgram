@@ -32,6 +32,7 @@ from .handlers.commands import commands_command, toolbar_command
 from .handlers.messaging_pipeline import toolcalls_command, verbose_command
 from .handlers.messaging_pipeline.message_sender import safe_reply
 from .handlers.recovery.history import history_command
+from .extensions import load_extensions
 from .handlers.registry import register_all
 from .handlers.text.text_handler import handle_text_message, text_handler
 from .handlers.topics import new_command
@@ -246,6 +247,9 @@ def create_bot() -> Application:
     )
 
     application.add_error_handler(_error_handler)
+    # Extension seam: MUST run before register_all so extension
+    # command handlers precede core's command-forwarding catch-all.
+    load_extensions(application.add_handler)
     register_all(application, _group_filter)
 
     return application

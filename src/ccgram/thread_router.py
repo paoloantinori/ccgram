@@ -34,6 +34,7 @@ from typing import Any, Literal, cast
 import uuid
 
 from .multiplexer.base import canonical_window_id
+from .extensions import emit as extensions_emit
 
 logger = structlog.get_logger()
 
@@ -1294,6 +1295,19 @@ class ThreadRouter:
             window_id,
             window_name=window_name,
             chat_id=chat_id,
+        )
+
+        # Extension seam domain event (docs/extension-seam.md): fires on
+        # EVERY bind path (creation, discovery adoption, recovery, resume,
+        # rebind), unlike any single caller. Payload is plain data; the
+        # window's cwd is resolved by listeners from persisted state.
+        extensions_emit(
+            "topic.bound",
+            user_id=user_id,
+            chat_id=chat_id,
+            thread_id=thread_id,
+            window_id=window_id,
+            window_name=window_name,
         )
 
     def unbind_thread(

@@ -46,6 +46,7 @@ from ..status.status_bubble import (
     process_status_update,
 )
 from .backlog import BacklogSnapshot, register_snapshot_provider
+from ...extensions import emit as extensions_emit
 from .message_sender import (
     edit_with_fallback,
     rate_limit_send,
@@ -1167,6 +1168,14 @@ async def _process_content_task(
             )
             if converted_msg_id is not None:
                 last_msg_id = converted_msg_id
+                extensions_emit(
+                    "message.delivered",
+                    chat_id=chat_id,
+                    message_id=converted_msg_id,
+                    window_id=task.window_id,
+                    text=part,
+                    thread_id=task.thread_id,
+                )
                 continue
         else:
             first_part = False
@@ -1177,6 +1186,14 @@ async def _process_content_task(
 
         if sent:
             last_msg_id = sent.message_id
+            extensions_emit(
+                "message.delivered",
+                chat_id=chat_id,
+                message_id=sent.message_id,
+                window_id=task.window_id,
+                text=part,
+                thread_id=task.thread_id,
+            )
         else:
             # The sender exhausted its entity/plain fallback without raising.
             # A transcript watermark must treat that as a terminal failure.

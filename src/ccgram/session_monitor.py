@@ -85,6 +85,9 @@ _REPLAY_CAP_BYTES = max(
 )
 _MSG_PREVIEW_LENGTH = 80
 
+_SKIP_BACKLOG_ON_START = os.getenv(
+    "CCGRAM_SKIP_BACKLOG_ON_START", ""
+).strip().lower() in ("1", "true", "yes", "on")
 logger = structlog.get_logger()
 
 
@@ -683,6 +686,16 @@ class SessionMonitor:
         prefix = session_map_prefix()
         return parse_session_map(raw, prefix)
 
+    async def _settle_all_sessions_at_eof(self) -> None:
+        for session_id, session in self.state.tracked_sessions.items():
+            try:
+                size = Path(session.file_path).stat().st_size
+            except OSError:
+                continue
+            if session.last_byte_offset < size:
+                session.last_byte_offset = size
+        self.state.save_if_dirty()
+
     async def _cleanup_all_stale_sessions(self) -> None:
         """Clean up all tracked sessions not in current session_map (startup)."""
         raw = await read_session_map_raw()
@@ -926,7 +939,7 @@ class SessionMonitor:
             deactivate_delivery_receipt(token)
             receipt.close()
 
-    async def _monitor_loop(self) -> None:
+    async def _monitor_loop(self) -> None:  # noqa: PLR0915
         """Background poll loop."""
         logger.info("Session monitor started, polling every %ss", self.poll_interval)
 
@@ -936,6 +949,8 @@ class SessionMonitor:
         from .session_map import session_map_sync
 
         await self._cleanup_all_stale_sessions()
+        if _SKIP_BACKLOG_ON_START:
+            await self._settle_all_sessions_at_eof()
         initial_raw = await read_session_map_raw()
         initial_map = await self._load_current_session_map(initial_raw)
         session_lifecycle.initialize(initial_map)
