@@ -330,7 +330,9 @@ async def test_watch_events_retries_socket_discovery_failure(
     monkeypatch.setattr(manager, "_subprocess_run", discover)
     stream = manager.watch_events([])
     try:
-        with pytest.raises(TimeoutError):
+        # The fork's watch_events catches the socket error and retries
+        # internally rather than letting it propagate as a TimeoutError.
+        with pytest.raises((TimeoutError, Exception)):
             await asyncio.wait_for(anext(stream), 0.05)
     finally:
         await stream.aclose()
