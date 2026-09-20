@@ -3,6 +3,7 @@
 import asyncio
 import json
 import os
+import time
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
@@ -557,6 +558,49 @@ class TestSettledPrefixWatermarkCommit:
 
         assert self._offset(monitor, "s1") == 0
         assert monitor._delivery_receipts["s1"] == [ready]
+
+    def test_aged_skip_barrier_force_completes(self, monitor: SessionMonitor) -> None:
+        # TASK-35: an undeliverable notice must not pause the source forever.
+        self._track(monitor, "s1", [self._ready(100)])
+        self._begin_skip(monitor)
+        intent = monitor.state.pending_skips["s1"]
+        intent.created_at = time.time() - 10_000.0
+
+        with patch.object(monitor, "_skip_is_current", return_value=True):
+            monitor._expire_aged_skip_barriers()
+
+        assert self._offset(monitor, "s1") == 500
+        assert "s1" not in monitor.state.pending_skips
+        assert "s1" not in monitor._skip_notice_receipts
+
+    def test_aged_skip_barrier_on_rebound_topic_cancels(
+        self, monitor: SessionMonitor
+    ) -> None:
+        # TASK-35 review: a rebound topic never advances the old watermark;
+        # the range stays replayable under the new binding.
+        self._track(monitor, "s1", [self._ready(100)])
+        self._begin_skip(monitor)
+        intent = monitor.state.pending_skips["s1"]
+        intent.created_at = time.time() - 10_000.0
+
+        with patch.object(monitor, "_skip_is_current", return_value=False):
+            monitor._expire_aged_skip_barriers()
+
+        assert self._offset(monitor, "s1") == 0
+        assert "s1" not in monitor.state.pending_skips
+
+    def test_legacy_barrier_without_stamp_gets_clock_started(
+        self, monitor: SessionMonitor
+    ) -> None:
+        # TASK-35: barriers persisted before the stamp are aged from first
+        # sight, not force-completed on the first cycle.
+        self._begin_skip(monitor)
+        assert monitor.state.pending_skips["s1"].created_at == 0.0
+
+        monitor._expire_aged_skip_barriers()
+
+        assert monitor.state.pending_skips["s1"].created_at > 0.0
+        assert "s1" in monitor.state.pending_skips
 
     def test_delivered_skip_wins_and_discards_ordinary_receipts(
         self, monitor: SessionMonitor
@@ -2133,11 +2177,15 @@ class TestAutoBacklogSkip:
             return SimpleNamespace()
 
         object.__setattr__(monitor, "request_backlog_skip", fake_skip)
+        object.__setattr__(monitor, "_autoskip_retry_at", {})
+        object.__setattr__(monitor, "_autoskip_path_mismatch_logged", set())
         big = tmp_path / "big.jsonl"
         big.write_text("x" * 100)
         fake_state = SimpleNamespace(
             pending_skips=set(),
-            get_session=lambda sid: SimpleNamespace(last_byte_offset=10),
+            get_session=lambda sid: SimpleNamespace(
+                last_byte_offset=10, file_path=str(big)
+            ),
         )
         object.__setattr__(monitor, "state", fake_state)
         monkeypatch.setattr(sm_mod, "_REPLAY_CAP_BYTES", 50)
@@ -2150,11 +2198,90 @@ class TestAutoBacklogSkip:
         assert await monitor._maybe_auto_backlog_skip("s", big, "wA") is True
         assert calls == [(1, "wA", 20, 10)]
 
+    async def test_path_mismatch_declines_auto_skip(self, monkeypatch, tmp_path):
+        # TASK-36: the map path and the tracked watermark describing two
+        # different files must not drive the cap heuristic.
+        import ccgram.session_monitor as sm_mod
+        from types import SimpleNamespace
+
+        calls = []
+        monitor = sm_mod.SessionMonitor.__new__(sm_mod.SessionMonitor)
+
+        async def fake_skip(user_id, window_id, thread_id, chat_id):
+            calls.append((user_id, window_id, thread_id, chat_id))
+            return SimpleNamespace()
+
+        object.__setattr__(monitor, "request_backlog_skip", fake_skip)
+        object.__setattr__(monitor, "_autoskip_retry_at", {})
+        object.__setattr__(monitor, "_autoskip_path_mismatch_logged", set())
+        big = tmp_path / "big.jsonl"
+        big.write_text("x" * 100)
+        object.__setattr__(
+            monitor,
+            "state",
+            SimpleNamespace(
+                pending_skips=set(),
+                get_session=lambda sid: SimpleNamespace(
+                    last_byte_offset=10,
+                    file_path=str(tmp_path / "tracked-elsewhere.jsonl"),
+                ),
+            ),
+        )
+        monkeypatch.setattr(sm_mod, "_REPLAY_CAP_BYTES", 50)
+        router = SimpleNamespace(
+            iter_thread_bindings_with_chat=lambda: iter([(1, 10, 20, "wA")])
+        )
+        import ccgram.thread_router as tr_mod
+
+        monkeypatch.setattr(tr_mod, "thread_router", router)
+        assert await monitor._maybe_auto_backlog_skip("s", big, "wA") is False
+        assert calls == []
+
+    async def test_failed_auto_skip_attempt_throttles(self, monkeypatch, tmp_path):
+        # TASK-36: a None intent must not re-enter the attempt every poll.
+        import ccgram.session_monitor as sm_mod
+        from types import SimpleNamespace
+
+        calls = []
+        monitor = sm_mod.SessionMonitor.__new__(sm_mod.SessionMonitor)
+
+        async def fake_skip(user_id, window_id, thread_id, chat_id):
+            calls.append((user_id, window_id, thread_id, chat_id))
+            return None
+
+        object.__setattr__(monitor, "request_backlog_skip", fake_skip)
+        object.__setattr__(monitor, "_autoskip_retry_at", {})
+        object.__setattr__(monitor, "_autoskip_path_mismatch_logged", set())
+        big = tmp_path / "big.jsonl"
+        big.write_text("x" * 100)
+        object.__setattr__(
+            monitor,
+            "state",
+            SimpleNamespace(
+                pending_skips=set(),
+                get_session=lambda sid: SimpleNamespace(
+                    last_byte_offset=10, file_path=str(big)
+                ),
+            ),
+        )
+        monkeypatch.setattr(sm_mod, "_REPLAY_CAP_BYTES", 50)
+        router = SimpleNamespace(
+            iter_thread_bindings_with_chat=lambda: iter([(1, 10, 20, "wA")])
+        )
+        import ccgram.thread_router as tr_mod
+
+        monkeypatch.setattr(tr_mod, "thread_router", router)
+        assert await monitor._maybe_auto_backlog_skip("s", big, "wA") is False
+        assert await monitor._maybe_auto_backlog_skip("s", big, "wA") is False
+        assert calls == [(1, "wA", 20, 10)]
+
     async def test_small_gap_reads_normally(self, monkeypatch, tmp_path):
         import ccgram.session_monitor as sm_mod
         from types import SimpleNamespace
 
         monitor = sm_mod.SessionMonitor.__new__(sm_mod.SessionMonitor)
+        object.__setattr__(monitor, "_autoskip_retry_at", {})
+        object.__setattr__(monitor, "_autoskip_path_mismatch_logged", set())
         f = tmp_path / "s.jsonl"
         f.write_text("x" * 10)
         object.__setattr__(
@@ -2162,7 +2289,9 @@ class TestAutoBacklogSkip:
             "state",
             SimpleNamespace(
                 pending_skips=set(),
-                get_session=lambda sid: SimpleNamespace(last_byte_offset=0),
+                get_session=lambda sid: SimpleNamespace(
+                    last_byte_offset=0, file_path=str(f)
+                ),
             ),
         )
         monkeypatch.setattr(sm_mod, "_REPLAY_CAP_BYTES", 1_000_000)
@@ -2173,6 +2302,8 @@ class TestAutoBacklogSkip:
         from types import SimpleNamespace
 
         monitor = sm_mod.SessionMonitor.__new__(sm_mod.SessionMonitor)
+        object.__setattr__(monitor, "_autoskip_retry_at", {})
+        object.__setattr__(monitor, "_autoskip_path_mismatch_logged", set())
         f = tmp_path / "s.jsonl"
         f.write_text("x" * 100)
         object.__setattr__(
@@ -2180,7 +2311,9 @@ class TestAutoBacklogSkip:
             "state",
             SimpleNamespace(
                 pending_skips=set(),
-                get_session=lambda sid: SimpleNamespace(last_byte_offset=0),
+                get_session=lambda sid: SimpleNamespace(
+                    last_byte_offset=0, file_path=str(f)
+                ),
             ),
         )
         monkeypatch.setattr(sm_mod, "_REPLAY_CAP_BYTES", 50)
@@ -2202,6 +2335,8 @@ class TestAutoBacklogSkipGuards:
             return None
 
         object.__setattr__(monitor, "request_backlog_skip", failing_skip)
+        object.__setattr__(monitor, "_autoskip_retry_at", {})
+        object.__setattr__(monitor, "_autoskip_path_mismatch_logged", set())
         f = tmp_path / "s.jsonl"
         f.write_text("x" * 100)
         object.__setattr__(
@@ -2209,7 +2344,9 @@ class TestAutoBacklogSkipGuards:
             "state",
             SimpleNamespace(
                 pending_skips=set(),
-                get_session=lambda sid: SimpleNamespace(last_byte_offset=0),
+                get_session=lambda sid: SimpleNamespace(
+                    last_byte_offset=0, file_path=str(f)
+                ),
             ),
         )
         monkeypatch.setattr(sm_mod, "_REPLAY_CAP_BYTES", 50)

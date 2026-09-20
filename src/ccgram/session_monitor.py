@@ -91,6 +91,36 @@ _SKIP_BACKLOG_ON_START = os.getenv(
 logger = structlog.get_logger()
 
 
+def _env_float(name: str, default: float) -> float:
+    """Parse an env knob, surviving empty or non-numeric values."""
+    try:
+        return float(os.getenv(name, "") or default)
+    except ValueError:
+        logger.warning("Invalid %s; using default %s", name, default)
+        return default
+
+
+# TASK-35: a skip barrier whose notice cannot be delivered (topic rebind,
+# dead topic, sustained flood control) must not pause its source forever.
+# Clamped low so a misconfigured value cannot expire barriers instantly.
+_SKIP_BARRIER_DEADLINE_S = max(
+    60.0, _env_float("CCGRAM_SKIP_BARRIER_DEADLINE_S", 600.0)
+)
+# TASK-36: throttle auto-skip attempts per session after a failed attempt,
+# and decline the cap heuristic when the transcript path changed since
+# tracking (worktree moves publish a different project-dir path). Clamped
+# at 1s so no value can silently disable the throttle.
+_AUTOSKIP_RETRY_S = max(1.0, _env_float("CCGRAM_AUTOSKIP_RETRY_S", 30.0))
+
+
+def _same_transcript(file_path: Path, tracked: str) -> bool:
+    """Same-file verdict tolerant of symlinked spellings of one path."""
+    try:
+        return file_path.resolve() == Path(tracked).resolve()
+    except OSError, RuntimeError:
+        return str(file_path) == tracked
+
+
 def _adoption_lookup(adoptable_window_ids: set[str]) -> set[str]:
     """The comparison form of the adoption set, built once per pass.
 
@@ -159,7 +189,11 @@ class SessionMonitor:
         ) = None
         self._skip_notice_receipts: dict[str, DeliveryReceipt] = {}
         self._skip_retry_attempts: dict[str, int] = {}
+        # Backoff table for a PENDING barrier's purge/notice steps.
         self._skip_retry_at: dict[str, float] = {}
+        # Flat pre-barrier throttle for failed auto-skip ATTEMPTS (TASK-36).
+        self._autoskip_retry_at: dict[str, float] = {}
+        self._autoskip_path_mismatch_logged: set[str] = set()
 
     # Delegation properties for backward-compatible test access
     @property
@@ -190,6 +224,8 @@ class SessionMonitor:
         """Drop receipts tied to a session identity that no longer exists."""
         self._delivery_receipts.pop(session_id, None)
         self._skip_notice_receipts.pop(session_id, None)
+        self._autoskip_retry_at.pop(session_id, None)
+        self._autoskip_path_mismatch_logged.discard(session_id)
         self._clear_skip_retry(session_id)
 
     def set_message_callback(
@@ -253,6 +289,7 @@ class SessionMonitor:
             chat_id=chat_id,
             snapshot_offset=snapshot_offset,
             range_start=session.last_byte_offset,
+            created_at=time.time(),
         )
         # The durable barrier is written before destructive queue retirement.
         self.state.begin_skip(intent)
@@ -370,6 +407,48 @@ class SessionMonitor:
         self._clear_skip_retry(intent.session_id)
         self._skip_notice_receipts[intent.session_id] = receipt
         return True
+
+    def _expire_aged_skip_barriers(self) -> None:
+        """TASK-35: complete barriers whose notice never delivered.
+
+        A skip sacrifices history for liveness. When the visible notice
+        cannot be delivered (rebound topic, dead topic, sustained flood
+        control), the barrier inverts that into permanent source silence.
+        Past the deadline the watermark advances to the frozen snapshot and
+        the barrier retires; the skip notice is dropped, not retried.
+        """
+        now = time.time()
+        for session_id, intent in tuple(self.state.pending_skips.items()):
+            if not intent.created_at:
+                # Legacy record predating the stamp: start its clock now,
+                # through the mutator so the stamp actually persists.
+                self.state.stamp_skip_clock(session_id, now)
+                continue
+            # A backwards clock step clamps to zero rather than either
+            # expiring fresh barriers or blocking expiry until catch-up.
+            age = max(0.0, now - intent.created_at)
+            if age <= _SKIP_BARRIER_DEADLINE_S:
+                continue
+            if not self._skip_is_current(intent):
+                # Never advance the old source watermark across a rebind:
+                # cancel so the range stays replayable under the new topic.
+                logger.warning(
+                    "Backlog skip barrier expired on a rebound topic; cancelling",
+                    session_id=session_id,
+                )
+                self.state.cancel_skip(session_id)
+            else:
+                logger.warning(
+                    "Backlog skip barrier expired without a delivered notice; "
+                    "advancing the watermark to unblock the source",
+                    session_id=session_id,
+                    barrier_age_seconds=round(age, 1),
+                )
+                if not self.state.complete_skip(session_id):
+                    self.state.cancel_skip(session_id)
+            self._discard_session_delivery_state(session_id)
+        # One batched write for any stamps and retirements this pass made.
+        self.state.save_if_dirty()
 
     async def _resume_pending_skip_notices(self) -> None:
         """Resume persisted skip barriers before reading any skipped bytes."""
@@ -574,7 +653,7 @@ class SessionMonitor:
         self.state.save_if_dirty()
         return new_messages
 
-    async def _maybe_auto_backlog_skip(
+    async def _maybe_auto_backlog_skip(  # noqa: PLR0911
         self, session_id: str, file_path: Path, window_id: str
     ) -> bool:
         """Auto-trigger the upstream skip barrier when the gap exceeds the cap.
@@ -595,6 +674,26 @@ class SessionMonitor:
             session = self.state.get_session(session_id)
             if session is None:
                 return False
+            if time.monotonic() < self._autoskip_retry_at.get(session_id, 0.0):
+                logger.debug(
+                    "Auto backlog skip throttled after a failed attempt",
+                    session_id=session_id,
+                )
+                return False
+            if session.file_path and not _same_transcript(file_path, session.file_path):
+                # The map/scan path and the tracked watermark describe two
+                # different files (a worktree move republishes the session
+                # under another project dir). Gap arithmetic across files is
+                # meaningless; replacement detection owns path changes.
+                if session_id not in self._autoskip_path_mismatch_logged:
+                    self._autoskip_path_mismatch_logged.add(session_id)
+                    logger.warning(
+                        "Auto backlog skip declined: transcript path changed "
+                        "since tracking (tracked=%s, current=%s)",
+                        session.file_path,
+                        str(file_path),
+                    )
+                return False
             gap = file_path.stat().st_size - session.last_byte_offset
             if gap <= _REPLAY_CAP_BYTES:
                 return False
@@ -610,11 +709,18 @@ class SessionMonitor:
                     user_id, window_id, thread_id, chat_id
                 )
                 if intent is not None:
+                    self._autoskip_retry_at.pop(session_id, None)
                     logger.warning(
                         "auto backlog skip: %s gap %.1fMB exceeds cap %.1fMB",
                         session_id,
                         gap / 1e6,
                         _REPLAY_CAP_BYTES / 1e6,
+                    )
+                else:
+                    # Throttle the retry: a stat race or unresolvable state
+                    # must not re-enter the attempt every poll cycle.
+                    self._autoskip_retry_at[session_id] = (
+                        time.monotonic() + _AUTOSKIP_RETRY_S
                     )
                 # Only claim the skip when a barrier actually exists: a
                 # None intent (unresolvable session, stat race) must not
@@ -1029,9 +1135,12 @@ class SessionMonitor:
                         if canonical_window_id(window_id) in live_window_ids
                     }
 
-                # A persisted barrier must be noticed before its source is read
-                # again; this preserves the exact EOF snapshot across restarts.
+                # Resume attempts run before expiry so a process that slept
+                # past the deadline still gets one notice delivery attempt
+                # (TASK-35); then aged barriers retire, then delivery
+                # commits advance what actually reached Telegram.
                 await self._resume_pending_skip_notices()
+                self._expire_aged_skip_barriers()
                 self._commit_pending_skips()
                 new_messages = await self.check_for_updates(monitored_map)
                 # Register every parsed message before the next await. A
