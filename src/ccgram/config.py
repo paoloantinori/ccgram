@@ -8,6 +8,7 @@ The module-level `config` instance is imported by nearly every other module.
 Key class: Config (singleton instantiated as `config`).
 """
 
+import math
 import structlog
 import os
 from pathlib import Path
@@ -45,13 +46,25 @@ def _resolve_toolbar_path() -> str:
     return str(fallback) if fallback.exists() else ""
 
 
+def _env_float(name: str, default: float) -> float:
+    """Parse an env knob, surviving empty or non-numeric values."""
+    raw = os.getenv(name, "") or str(default)
+    try:
+        return float(raw)
+    except ValueError:
+        logger.warning("Invalid %s; using default %s", name, default)
+        return default
+
+
 def _skip_barrier_deadline_s() -> float:
     """Backlog-skip barrier aging, floored so no value expires barriers
-    near-instantly and tolerant of empty or non-numeric input."""
-    try:
-        return max(60.0, float(os.getenv("CCGRAM_SKIP_BARRIER_DEADLINE_S") or 600.0))
-    except ValueError:
+    near-instantly and tolerant of empty, non-numeric, or non-finite
+    input (inf would disable expiry outright)."""
+    value = _env_float("CCGRAM_SKIP_BARRIER_DEADLINE_S", 600.0)
+    if not math.isfinite(value):
+        logger.warning("Invalid CCGRAM_SKIP_BARRIER_DEADLINE_S; using default 600.0")
         return 600.0
+    return max(60.0, value)
 
 
 class Config:

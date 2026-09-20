@@ -110,8 +110,6 @@ class TestErrorHandlerStaleCallback:
         with (
             patch("ccgram.bot.logger") as mock_logger,
             patch("ccgram.bot.time.monotonic", side_effect=[100.0, 190.0]),
-            # A real loop would arm the exit watchdog with a mocked clock.
-            patch("ccgram.bot.asyncio.get_running_loop", return_value=MagicMock()),
         ):
             await _error_handler(None, ctx)
             await _error_handler(None, ctx)
@@ -142,8 +140,6 @@ class TestErrorHandlerStaleCallback:
         with (
             patch.object(HTTPXRequest, "do_request", AsyncMock(return_value=response)),
             patch("ccgram.bot.time.monotonic", side_effect=[100.0, 190.0]),
-            # A real loop would arm the exit watchdog with a mocked clock.
-            patch("ccgram.bot.asyncio.get_running_loop", return_value=MagicMock()),
         ):
             for _ in range(2):
                 with pytest.raises(Conflict) as raised:
@@ -165,12 +161,10 @@ class TestShutdownExitWatchdog:
         )
 
         fake_monitor = MagicMock()
-        fake_loop = MagicMock()
-        handle = MagicMock()
-        fake_loop.call_later.return_value = handle
+        timer = MagicMock()
         app = MagicMock()
         with (
-            patch("ccgram.bot.asyncio.get_running_loop", return_value=fake_loop),
+            patch("ccgram.bot.threading.Timer", return_value=timer) as timer_cls,
             patch(
                 "ccgram.session_monitor.get_active_monitor",
                 return_value=fake_monitor,
@@ -180,13 +174,17 @@ class TestShutdownExitWatchdog:
             patch("ccgram.bot.bootstrap.shutdown_runtime", new=AsyncMock()),
         ):
             await post_stop(app)
-            fake_loop.call_later.assert_called_once_with(
-                _SHUTDOWN_EXIT_WATCHDOG_S, _hard_exit_if_shutdown_wedged, fake_monitor
+            timer_cls.assert_called_once_with(
+                _SHUTDOWN_EXIT_WATCHDOG_S,
+                _hard_exit_if_shutdown_wedged,
+                args=(fake_monitor,),
             )
+            assert timer.daemon is True
+            timer.start.assert_called_once()
             goodbye.assert_awaited_once()
 
             await post_shutdown(app)
-        handle.cancel.assert_called_once()
+        timer.cancel.assert_called_once()
 
     async def test_hard_exit_saves_captured_monitor_and_exits(self) -> None:
         from ccgram.bot import _hard_exit_if_shutdown_wedged
@@ -209,15 +207,14 @@ class TestShutdownExitWatchdog:
     async def test_conflict_stop_does_not_arm_the_watchdog(self) -> None:
         # Arming lives in post_stop, the common funnel of every shutdown.
         ctx = _make_context(Conflict("409 Conflict"))
-        fake_loop = MagicMock()
         with (
-            patch("ccgram.bot.asyncio.get_running_loop", return_value=fake_loop),
+            patch("ccgram.bot.threading.Timer") as timer_cls,
             patch("ccgram.bot.time.monotonic", side_effect=[100.0, 190.0]),
         ):
             await _error_handler(None, ctx)
             await _error_handler(None, ctx)
         ctx.application.stop_running.assert_called_once()
-        fake_loop.call_later.assert_not_called()
+        timer_cls.assert_not_called()
 
 
 class TestShutdownNotification:

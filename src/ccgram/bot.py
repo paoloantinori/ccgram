@@ -14,10 +14,10 @@ Responsibilities kept here:
     by the message handler registry
 """
 
-import asyncio
 import os
 import signal
 import sys
+import threading
 import time
 
 import structlog
@@ -86,7 +86,7 @@ _GET_UPDATES_READ_TIMEOUT_S = 20.0
 # need more, so the watchdog sits well above that; a wedged drain is
 # dead, not slow.
 _SHUTDOWN_EXIT_WATCHDOG_S = 600.0
-_shutdown_exit_timer: asyncio.TimerHandle | None = None
+_shutdown_exit_timer: threading.Timer | None = None
 
 
 class _PollingConflictState:
@@ -212,9 +212,13 @@ async def post_stop(application: Application) -> None:
     from .session_monitor import get_active_monitor
 
     monitor = get_active_monitor()
-    _shutdown_exit_timer = asyncio.get_running_loop().call_later(
-        _SHUTDOWN_EXIT_WATCHDOG_S, _hard_exit_if_shutdown_wedged, monitor
+    # TASK-37: a thread timer, not a loop timer: the wedges this guards
+    # include the event loop itself blocked in a synchronous send or fsync.
+    _shutdown_exit_timer = threading.Timer(
+        _SHUTDOWN_EXIT_WATCHDOG_S, _hard_exit_if_shutdown_wedged, args=(monitor,)
     )
+    _shutdown_exit_timer.daemon = True
+    _shutdown_exit_timer.start()
     await bootstrap.stop_delivery_runtime()
     await _send_shutdown_notification(application)
 

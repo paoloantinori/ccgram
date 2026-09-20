@@ -33,11 +33,13 @@ logger = structlog.get_logger()
 _MIN_THINKING_LENGTH = 20
 
 # TASK-34: this handler runs inline in the monitor's sequential dispatch,
-# so an unbounded queue.join() here freezes delivery for every session. The
-# wait gives up only when the queue is idle-stalled, not merely slow:
-# flood control legitimately drains for minutes, while a dead worker
-# never completes at all.
-_INTERACTIVE_QUEUE_IDLE_TIMEOUT_S = 8.0
+# so an unbounded queue.join() here freezes delivery for every session.
+# The wait is bounded by a total budget sized for healthy flood-control
+# drains (two 30s retry windows plus margin): queue counts cannot
+# distinguish a send backing off from a wedged one, so time is the only
+# honest bound. An interactive UI may reorder against pending messages
+# after the budget, but dispatch always continues.
+_INTERACTIVE_QUEUE_JOIN_TIMEOUT_S = 90.0
 
 # One draft per session/topic. Provider updates are cumulative snapshots, not deltas.
 _DRAFT_TTL_SECONDS = 25.0
@@ -196,29 +198,18 @@ async def handle_new_message(msg: NewMessage, client: TelegramClient) -> None:  
 
         if msg.tool_name in INTERACTIVE_TOOL_NAMES and msg.content_type == "tool_use":
             set_interactive_mode(user_id, window_id, thread_id, chat_id=chat_id)
-            queue = get_or_create_queue(client, user_id)
             # TASK-34: the creating getter also respawns a dead queue worker,
             # the one wedge a plain get would leave join() waiting on forever.
             queue = get_or_create_queue(client, user_id)
-            last_pending = queue.qsize()
-            while True:
-                try:
-                    await asyncio.wait_for(
-                        queue.join(), _INTERACTIVE_QUEUE_IDLE_TIMEOUT_S
-                    )
-                    break
-                except asyncio.TimeoutError:
-                    pending = queue.qsize()
-                    if pending == last_pending:
-                        logger.warning(
-                            "Delivery queue idle before interactive UI; "
-                            "proceeding so the monitor keeps dispatching",
-                            user_id=user_id,
-                            window_id=window_id,
-                            pending=pending,
-                        )
-                        break
-                    last_pending = pending
+            try:
+                await asyncio.wait_for(queue.join(), _INTERACTIVE_QUEUE_JOIN_TIMEOUT_S)
+            except asyncio.TimeoutError:
+                logger.warning(
+                    "Delivery queue still draining before interactive UI; "
+                    "proceeding so the monitor keeps dispatching",
+                    user_id=user_id,
+                    window_id=window_id,
+                )
             await asyncio.sleep(0.3)
             handled = await handle_interactive_ui(
                 client, user_id, window_id, thread_id, chat_id=chat_id

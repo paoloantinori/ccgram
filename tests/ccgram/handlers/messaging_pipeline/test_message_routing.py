@@ -142,16 +142,16 @@ async def test_interactive_tool_use_handled_skips_enqueue(bot, mock_deps):
     mock_deps["eq"].assert_not_called()
 
 
-async def test_interactive_dispatch_survives_idle_stalled_queue(bot, mock_deps):
-    # TASK-34: a per-user queue whose pending count never moves must not
-    # freeze the sequential monitor dispatch on queue.join().
+async def test_interactive_dispatch_survives_never_draining_queue(bot, mock_deps):
+    # TASK-34: a per-user queue whose item never completes must not freeze
+    # the sequential monitor dispatch on queue.join().
     queue: asyncio.Queue = asyncio.Queue()
     queue.put_nowait(object())  # never task_done -> join() blocks forever
     mock_deps["gmq"].return_value = queue
     mock_deps["hui"].return_value = True
     with patch.object(
         message_routing,
-        "_INTERACTIVE_QUEUE_IDLE_TIMEOUT_S",
+        "_INTERACTIVE_QUEUE_JOIN_TIMEOUT_S",
         0.05,
     ):
         await asyncio.wait_for(

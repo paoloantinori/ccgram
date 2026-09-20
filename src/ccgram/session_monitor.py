@@ -27,7 +27,7 @@ from typing import Any
 
 from telegram.error import TelegramError
 
-from .config import config
+from .config import _env_float, config
 from .delivery_contract import (
     DeliveryReceipt,
     activate_delivery_receipt,
@@ -89,15 +89,6 @@ _SKIP_BACKLOG_ON_START = os.getenv(
     "CCGRAM_SKIP_BACKLOG_ON_START", ""
 ).strip().lower() in ("1", "true", "yes", "on")
 logger = structlog.get_logger()
-
-
-def _env_float(name: str, default: float) -> float:
-    """Parse an env knob, surviving empty or non-numeric values."""
-    try:
-        return float(os.getenv(name, "") or default)
-    except ValueError:
-        logger.warning("Invalid %s; using default %s", name, default)
-        return default
 
 
 # TASK-35: a skip barrier whose notice cannot be delivered (topic rebind,
@@ -302,16 +293,8 @@ class SessionMonitor:
         return intent
 
     def _skip_is_current(self, intent: BacklogSkipIntent) -> bool:
-        callback = self._skip_validate_callback
-        if callback is None:
-            return False
-        try:
-            return callback(intent)
-        except Exception:
-            logger.exception(
-                "Failed to validate backlog skip for %s", intent.session_id
-            )
-            return False
+        """Bool view of the verdict: absent or failed validator is not current."""
+        return self._skip_rebind_verdict(intent) is True
 
     def _skip_retry_due(self, session_id: str) -> bool:
         return time.monotonic() >= self._skip_retry_at.get(session_id, 0.0)
@@ -407,10 +390,10 @@ class SessionMonitor:
         return True
 
     def _skip_rebind_verdict(self, intent: BacklogSkipIntent) -> bool | None:
-        """True when the barrier is current, False on a definitive rebind.
+        """True when current, False on a definitive rebind, None unknown.
 
-        None means the validator itself failed; the caller must decide
-        nothing on that verdict and retry on a later pass.
+        None covers both an absent validator and one that raised: the
+        caller must decide nothing on that verdict and retry later.
         """
         callback = self._skip_validate_callback
         if callback is None:
@@ -429,8 +412,10 @@ class SessionMonitor:
         A skip sacrifices history for liveness. When the visible notice
         cannot be delivered (rebound topic, dead topic, sustained flood
         control), the barrier inverts that into permanent source silence.
-        Past the deadline the barrier retires; the skip notice is dropped,
-        not retried.
+        Past the deadline the barrier is decided: a validator failure
+        defers, a rebind or incomplete purge cancels so the range
+        replays, and only a current barrier with a completed purge
+        completes.
         """
         if not self.state.pending_skips:
             return
