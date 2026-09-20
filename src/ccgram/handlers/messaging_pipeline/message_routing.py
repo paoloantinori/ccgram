@@ -32,6 +32,12 @@ logger = structlog.get_logger()
 
 _MIN_THINKING_LENGTH = 20
 
+# TASK-34: this handler runs inline in the monitor's sequential dispatch, so
+# an unbounded queue.join() here freezes delivery for every session. The
+# timeout trades "interactive UI strictly after all queued messages" for
+# "the monitor always keeps dispatching".
+_INTERACTIVE_QUEUE_JOIN_TIMEOUT_S = 8.0
+
 # One draft per session/topic. Provider updates are cumulative snapshots, not deltas.
 _DRAFT_TTL_SECONDS = 25.0
 _active_drafts: dict[tuple[int, str, int | None, int], DraftStream] = {}
@@ -191,7 +197,17 @@ async def handle_new_message(msg: NewMessage, client: TelegramClient) -> None:  
             set_interactive_mode(user_id, window_id, thread_id, chat_id=chat_id)
             queue = get_message_queue(user_id)
             if queue:
-                await queue.join()
+                try:
+                    await asyncio.wait_for(
+                        queue.join(), _INTERACTIVE_QUEUE_JOIN_TIMEOUT_S
+                    )
+                except asyncio.TimeoutError:
+                    logger.warning(
+                        "Delivery queue still draining before interactive UI; "
+                        "proceeding so the monitor keeps dispatching",
+                        user_id=user_id,
+                        window_id=window_id,
+                    )
             await asyncio.sleep(0.3)
             handled = await handle_interactive_ui(
                 client, user_id, window_id, thread_id, chat_id=chat_id

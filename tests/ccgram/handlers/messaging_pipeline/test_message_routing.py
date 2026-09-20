@@ -142,6 +142,34 @@ async def test_interactive_tool_use_handled_skips_enqueue(bot, mock_deps):
     mock_deps["eq"].assert_not_called()
 
 
+async def test_interactive_dispatch_survives_never_draining_queue(bot, mock_deps):
+    # TASK-34: a per-user queue whose item never completes must not freeze
+    # the sequential monitor dispatch on queue.join().
+    queue: asyncio.Queue = asyncio.Queue()
+    queue.put_nowait(object())  # never task_done -> join() blocks forever
+    mock_deps["gmq"].return_value = queue
+    mock_deps["hui"].return_value = True
+    with patch.object(
+        message_routing,
+        "_INTERACTIVE_QUEUE_JOIN_TIMEOUT_S",
+        0.05,
+    ):
+        await asyncio.wait_for(
+            handle_new_message(
+                _make_msg(
+                    text="?",
+                    content_type="tool_use",
+                    tool_name="AskUserQuestion",
+                    tool_use_id="t1",
+                ),
+                bot,
+            ),
+            timeout=2.0,
+        )
+    mock_deps["hui"].assert_called_once()
+    mock_deps["eq"].assert_not_called()
+
+
 async def test_interactive_tool_use_unhandled_falls_through(bot, mock_deps):
     mock_deps["hui"].return_value = False
     await handle_new_message(
