@@ -17,6 +17,7 @@ Responsibilities kept here:
 import asyncio
 import os
 import signal
+import sys
 import time
 
 import structlog
@@ -74,13 +75,18 @@ logger = structlog.get_logger()
 
 _CONFLICT_GRACE_PERIOD_S = 90.0
 _GET_UPDATES_READ_TIMEOUT_S = 20.0
-# TASK-37: if PTB's shutdown wedges after stop_running(), the process lives
-# on with a torn-down HTTP client while the monitor keeps producing sends
-# that all fail ("This HTTPXRequest is not initialized"). Force the exit the
-# supervisor already knows how to handle. Generous window: a HEALTHY
-# teardown can legitimately take 150-210s (unbounded update-queue join plus
-# a rate-limited goodbye send), so the watchdog must sit well above that.
-_CONFLICT_EXIT_WATCHDOG_S = 300.0
+# TASK-37: if the shutdown sequence wedges (any cause: conflict stop,
+# SIGTERM, /upgrade), the process lives on with a torn-down HTTP client
+# while the monitor keeps producing sends that all fail ("This
+# HTTPXRequest is not initialized"), mute but healthy-looking to any
+# process check. post_stop arms a hard-exit watchdog and post_shutdown
+# cancels it on completion. Generous window: a HEALTHY teardown can
+# legitimately take 150-210s (unbounded update-queue join plus a
+# rate-limited goodbye send) and a deep backlog under flood control can
+# need more, so the watchdog sits well above that; a wedged drain is
+# dead, not slow.
+_SHUTDOWN_EXIT_WATCHDOG_S = 600.0
+_shutdown_exit_timer: asyncio.TimerHandle | None = None
 
 
 class _PollingConflictState:
@@ -123,23 +129,21 @@ def _record_successful_poll() -> None:
     _polling_conflict_state.record_success()
 
 
-def _hard_exit_if_shutdown_wedged() -> None:
-    if not _polling_conflict_state.shutdown_requested:
-        return
+def _hard_exit_if_shutdown_wedged(monitor: object | None) -> None:
     logger.critical(
-        "Polling shutdown did not complete within %.0fs; forcing exit "
-        "so the service supervisor restarts ccgram",
-        _CONFLICT_EXIT_WATCHDOG_S,
+        "Shutdown did not complete within %.0fs; forcing exit so the "
+        "service supervisor restarts ccgram",
+        _SHUTDOWN_EXIT_WATCHDOG_S,
     )
     try:
-        # Best-effort watermark save: unsent bytes replay, sent bytes do not.
-        from .session_monitor import get_active_monitor
-
-        monitor = get_active_monitor()
+        # Best-effort watermark save with the monitor captured at post_stop
+        # entry, before bootstrap clears the active-monitor registry.
+        # Unsent bytes replay, settled bytes do not.
         if monitor is not None:
-            monitor.state.save()
+            monitor.state.save()  # type: ignore[attr-defined]
     except Exception:  # noqa: BLE001, the forced exit must proceed regardless
         logger.exception("State save before forced exit failed")
+    sys.stdout.flush()
     os._exit(1)
 
 
@@ -199,20 +203,36 @@ async def post_stop(application: Application) -> None:
 
     PTB runs post_stop before Application.shutdown (HTTPXRequest teardown),
     so this is the only place where queued Telegram sends can still succeed.
+    Every shutdown path (conflict stop, signal, /upgrade) funnels through
+    here, so this is where the wedged-shutdown watchdog is armed; the
+    monitor is captured before bootstrap clears the active registry.
+    post_shutdown cancels the timer once teardown completes.
     """
+    global _shutdown_exit_timer
+    from .session_monitor import get_active_monitor
+
+    monitor = get_active_monitor()
+    _shutdown_exit_timer = asyncio.get_running_loop().call_later(
+        _SHUTDOWN_EXIT_WATCHDOG_S, _hard_exit_if_shutdown_wedged, monitor
+    )
     await bootstrap.stop_delivery_runtime()
     await _send_shutdown_notification(application)
 
 
 async def post_shutdown(_application: Application) -> None:
-    """Tear down runtime state — see ``bootstrap.shutdown_runtime``."""
-    await bootstrap.shutdown_runtime()
+    """Tear down runtime state; see ``bootstrap.shutdown_runtime``."""
+    global _shutdown_exit_timer
+    try:
+        await bootstrap.shutdown_runtime()
+    finally:
+        if _shutdown_exit_timer is not None:
+            _shutdown_exit_timer.cancel()
+            _shutdown_exit_timer = None
 
 
 async def _error_handler(_update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle bot-level errors from updater and handlers."""
     if isinstance(context.error, Conflict):
-        was_shutdown_requested = _polling_conflict_state.shutdown_requested
         if _polling_conflict_state.record_conflict(time.monotonic()):
             logger.critical(
                 "Telegram polling conflict persisted for %.0fs; stopping so the "
@@ -220,12 +240,6 @@ async def _error_handler(_update: object, context: ContextTypes.DEFAULT_TYPE) ->
                 _CONFLICT_GRACE_PERIOD_S,
             )
             context.application.stop_running()
-            if not was_shutdown_requested:
-                # Arm once per episode: post-grace conflicts repeat while the
-                # shutdown drains, and each would stack another timer.
-                asyncio.get_running_loop().call_later(
-                    _CONFLICT_EXIT_WATCHDOG_S, _hard_exit_if_shutdown_wedged
-                )
         else:
             logger.warning(
                 "Telegram polling conflict; retrying for up to %.0fs before stopping. "
