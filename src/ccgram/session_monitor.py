@@ -102,10 +102,8 @@ def _env_float(name: str, default: float) -> float:
 
 # TASK-35: a skip barrier whose notice cannot be delivered (topic rebind,
 # dead topic, sustained flood control) must not pause its source forever.
-# Clamped low so a misconfigured value cannot expire barriers instantly.
-_SKIP_BARRIER_DEADLINE_S = max(
-    60.0, _env_float("CCGRAM_SKIP_BARRIER_DEADLINE_S", 600.0)
-)
+# Parsed and clamped in config.py with the other CCGRAM_* tunables.
+_SKIP_BARRIER_DEADLINE_S = config.skip_barrier_deadline_s
 # TASK-36: throttle auto-skip attempts per session after a failed attempt,
 # and decline the cap heuristic when the transcript path changed since
 # tracking (worktree moves publish a different project-dir path). Clamped
@@ -408,15 +406,34 @@ class SessionMonitor:
         self._skip_notice_receipts[intent.session_id] = receipt
         return True
 
+    def _skip_rebind_verdict(self, intent: BacklogSkipIntent) -> bool | None:
+        """True when the barrier is current, False on a definitive rebind.
+
+        None means the validator itself failed; the caller must decide
+        nothing on that verdict and retry on a later pass.
+        """
+        callback = self._skip_validate_callback
+        if callback is None:
+            return None
+        try:
+            return callback(intent)
+        except Exception:
+            logger.exception(
+                "Failed to validate backlog skip for %s", intent.session_id
+            )
+            return None
+
     def _expire_aged_skip_barriers(self) -> None:
-        """TASK-35: complete barriers whose notice never delivered.
+        """TASK-35: retire barriers whose notice never delivered.
 
         A skip sacrifices history for liveness. When the visible notice
         cannot be delivered (rebound topic, dead topic, sustained flood
         control), the barrier inverts that into permanent source silence.
-        Past the deadline the watermark advances to the frozen snapshot and
-        the barrier retires; the skip notice is dropped, not retried.
+        Past the deadline the barrier retires; the skip notice is dropped,
+        not retried.
         """
+        if not self.state.pending_skips:
+            return
         now = time.time()
         for session_id, intent in tuple(self.state.pending_skips.items()):
             if not intent.created_at:
@@ -424,16 +441,26 @@ class SessionMonitor:
                 # through the mutator so the stamp actually persists.
                 self.state.stamp_skip_clock(session_id, now)
                 continue
-            # A backwards clock step clamps to zero rather than either
-            # expiring fresh barriers or blocking expiry until catch-up.
-            age = max(0.0, now - intent.created_at)
-            if age <= _SKIP_BARRIER_DEADLINE_S:
+            if now - intent.created_at <= _SKIP_BARRIER_DEADLINE_S:
                 continue
-            if not self._skip_is_current(intent):
+            current = self._skip_rebind_verdict(intent)
+            if current is None:
+                # Validator unavailable: decide nothing this pass.
+                continue
+            if not current:
                 # Never advance the old source watermark across a rebind:
                 # cancel so the range stays replayable under the new topic.
                 logger.warning(
                     "Backlog skip barrier expired on a rebound topic; cancelling",
+                    session_id=session_id,
+                )
+                self.state.cancel_skip(session_id)
+            elif not intent.purge_complete:
+                # The queued range was never retired: prefer replay over
+                # silently skipping bytes the queue may still deliver.
+                logger.warning(
+                    "Backlog skip barrier expired with its purge incomplete; "
+                    "cancelling so the range replays",
                     session_id=session_id,
                 )
                 self.state.cancel_skip(session_id)
@@ -442,7 +469,7 @@ class SessionMonitor:
                     "Backlog skip barrier expired without a delivered notice; "
                     "advancing the watermark to unblock the source",
                     session_id=session_id,
-                    barrier_age_seconds=round(age, 1),
+                    barrier_age_seconds=round(now - intent.created_at, 1),
                 )
                 if not self.state.complete_skip(session_id):
                     self.state.cancel_skip(session_id)
