@@ -41,6 +41,18 @@ under lock, anti-loop guards, PEP 758 floor matches upstream
 requires-python >=3.14, 2x battery 7280 on the branch). Posted:
 issue 267 + PR 268 (fix/durable-session-aliases, closes 267) on
 2026-09-21. PR family now 263/264/265/266/268.
+
+Greptile round 2 (2026-09-21 10:10-10:23 UTC), all answered inline:
+- 266 P1 Escape literal: CONFIRMED (literal=True types the word +
+  Enter into the modal). Fixed on the branch (1c7ef173, additive)
+  and on the fork (8fdf1ddb, battery 7328, stamp, bird redeployed
+  and verified). Fork production ran this bug since 866eedf1.
+- 268 P1 PEP 758 syntax: REFUTED (upstream requires >=3.14, same
+  form in session_monitor/hook/screen_buffer/session_map).
+- 268 P1 unrelated-merge: data-loss half refuted (setdefault keeps
+  the live entry on collision); adoption semantics defended as the
+  issue's own proposal, config-flag opt-in offered to the
+  maintainer.
 #245 gets NO PR: the maintainer took the design and fix on the
 maintainer side on 2026-09-13.
 
