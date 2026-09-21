@@ -45,6 +45,20 @@ live high-volume flow.
 Mac: unaffected decision, its incident is the legacy session_map keys
 (owned by ccgram-mac + local_ai with an agreed plan).
 
+## Progress (2026-09-21 23:35)
+
+Both fixes shipped as 94ba59d2 (pushed mine/fork/main, deployed bird,
+venv verified, service clean). Code-review high ran (agent pass): gate
+placement, marker semantics, mutation-sensitive test, fold-recovery
+ordering verified; its Medium (retain path re-probed and re-logged
+every poll cycle once the finally cleared the marker) and Low
+(retired-topic drain ignoring the knob) both fixed in the same commit:
+the dead-marker stays sticky on the retain path and the drain is
+gated. Env plumbing proven end-to-end (module probe read False from
+the live .env before deploy). Remaining observation: the first real
+agent re-key should log dead_session_topic_retained and produce NO
+deletion; auto-skip fires on the anti-vocale should stop (cap 16MB).
+
 ## Definition of done
 
 Battery + lint + pyright green; code-review high on the diff; commit
