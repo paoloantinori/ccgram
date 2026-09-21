@@ -209,6 +209,7 @@ async def post_stop(application: Application) -> None:
     post_shutdown cancels the timer once teardown completes.
     """
     global _shutdown_exit_timer
+    # Lazy: session_monitor imports bot for lifecycle callbacks
     from .session_monitor import get_active_monitor
 
     monitor = get_active_monitor()
