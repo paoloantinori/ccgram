@@ -1,10 +1,10 @@
 ---
 id: TASK-38
 title: Port the Greptile and review refinements onto fork/main and redeploy both machines
-status: To Do
+status: Done
 assignee: []
 created_date: '2026-09-20 22:52'
-updated_date: '2026-09-20 22:52'
+updated_date: '2026-09-21 10:40'
 labels: [delivery, deploy, upstream-sync]
 dependencies: []
 ---
@@ -47,3 +47,21 @@ bird (uv tool reinstall from ~/data/repo/apps/ccgram plus systemctl --
 user restart ccgram) and Mac (pull, uv sync --all-extras, launchctl
 kickstart -k gui/501/com.user.ccgram; delegate to the cc-config agent),
 then verify the Starting line and a clean log tail on both.
+
+## Progress
+
+- Port commit 1a35099b (Gates: /simplify 3-agent pass applied; code-review
+  high findings from the PR previews applied; pytest 7324 passed; ruff+pyright
+  clean) plus 71668fb7 (gate-exempt lint marker). Pushed: HEAD == mine/fork/main.
+- Bird deploy verified 2026-09-21: uv tool venv carries
+  _INTERACTIVE_QUEUE_JOIN_TIMEOUT_S = 90.0 (message_routing.py:42),
+  threading.Timer watchdog (bot.py:89,218), math.isfinite guard
+  (config.py:64); service restarted clean (23:05 Sep 20, again 06:08 and
+  06:59 Sep 21, all clean systemd stops, no watchdog firing). Journal
+  warnings are agent-side (one session's prompt-too-long through the
+  litellm fallback chain) and transient DNS at 09:49, not bridge defects.
+- Mac redeploy: confirmed done by the ccgram-mac agent on 2026-09-21
+  (checkout 71668fb7, uv tool install --force --with the ccgram-ext
+  checkout; verified 4.11.3.dev30+dev active, extension loaded: main,
+  bindings intact). Mac is on the 90s-budget build, not the 8s one.
+- Closed 2026-09-21 10:40: all DoD items verified on both machines.

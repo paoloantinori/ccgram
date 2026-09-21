@@ -35,3 +35,14 @@ attests alone (dead digest -> unique live digest on the same full
 on the deploy restart itself: the hassio binding survived a bridge
 restart with the re-keyed agent, which was exactly the failing
 scenario. Review 4/4 + ambiguity-guard test; battery 7063.
+
+REGRESSION FOUND 2026-09-21: the v4.11.2 replay (27-commit
+cherry-pick series) dropped this feature during conflict resolution
+and the restore commit 27163ee5 did not list it among the four
+restored features (its title named TASK-28 but the durable fold was
+not in it). fork/main ran without the fold from the replay until
+today. RESTORED same day as commit c18d40c8 (cherry-pick of 033fe1ae
+with a trivial end-of-file test conflict resolved): battery 7328
+passed, session tests 149. Lesson applied: when a replay commit's
+title claims a task, verify the FEATURE not the title (grep the
+symbol) before calling the restore complete.

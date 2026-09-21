@@ -31,6 +31,15 @@ misses in-flight), P1 on 264 (watchdog shares the blocked loop), P2 on
 265 (inf deadline): all confirmed, fixed on the branches (force-push),
 replied inline citing the commits. CI green on all three, MERGEABLE.
 
+Added 2026-09-21: PR 266 (fix/expired-interactive-escape, closes #256,
+the interactive dismissal reordered above the pane send; found while
+preparing the PR that the shipped order sent the text into the pane
+first). Queued behind the in-flight adversarial review: issue + PR for
+the durable session-map alias fold (TASK-28), branch
+fix/durable-session-aliases already cut at upstream/main 0d2e395e.
+#245 gets NO PR: the maintainer took the design and fix on the
+maintainer side on 2026-09-13.
+
 Remaining: watch for maintainer or bot feedback (reviews, inline
 comments, CI), answer every substantive comment, iterate to merge or
 close. When a maintainer requests changes, prefer additive commits over
