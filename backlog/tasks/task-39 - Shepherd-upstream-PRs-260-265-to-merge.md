@@ -34,9 +34,13 @@ replied inline citing the commits. CI green on all three, MERGEABLE.
 Added 2026-09-21: PR 266 (fix/expired-interactive-escape, closes #256,
 the interactive dismissal reordered above the pane send; found while
 preparing the PR that the shipped order sent the text into the pane
-first). Queued behind the in-flight adversarial review: issue + PR for
-the durable session-map alias fold (TASK-28), branch
-fix/durable-session-aliases already cut at upstream/main 0d2e395e.
+first). The dispatched adversarial reviewer died without completing
+(no notification, task record gone after the compaction); replaced
+by a targeted inline verification of the fold (logic, write-through
+under lock, anti-loop guards, PEP 758 floor matches upstream
+requires-python >=3.14, 2x battery 7280 on the branch). Posted:
+issue 267 + PR 268 (fix/durable-session-aliases, closes 267) on
+2026-09-21. PR family now 263/264/265/266/268.
 #245 gets NO PR: the maintainer took the design and fix on the
 maintainer side on 2026-09-13.
 
