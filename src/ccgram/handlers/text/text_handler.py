@@ -491,34 +491,13 @@ async def _forward_message(
 
     lifecycle_strategy.clear_probe_failures(window_id)
 
-    success, err_message = await send_telegram_to_window(
-        user_id, window_id, thread_id, text, message.chat.id
-    )
-    if not success:
-        await safe_reply(message, f"\u274c {err_message}")
-        return
-
-    await ack_reaction(client, message.chat.id, message.message_id)
-
-    # Lazy: command_history cycle — same as status_bar_actions sites.
-    from ..command_history import record_command
-
-    record_command(user_id, thread_id, text)
-
-    # Start background capture for ! bash command output
-    if text.startswith("!") and len(text) > 1:
-        bash_cmd = text[1:]  # strip leading "!"
-        task = asyncio.create_task(
-            _capture_bash_output(client, user_id, thread_id, window_id, bash_cmd)
-        )
-        task.add_done_callback(task_done_callback)
-        _bash_capture_tasks[(user_id, thread_id)] = task
-
     # If in interactive mode, the terminal likely has a modal prompt
     # (AskUserQuestion / ExitPlanMode) that swallows plain text. Dismiss
-    # it with Escape and STOP: forwarding the text would send it to the
-    # agent as a command, derailing the conversation. The user types
-    # again once the prompt is gone.
+    # it with Escape and STOP: the text must never reach the pane, where
+    # a live modal would treat it as an answer and a stale one would
+    # hand it to the agent as a command, derailing the conversation.
+    # The user types again once the prompt is gone. This check runs
+    # BEFORE send_telegram_to_window on purpose.
     interactive_window = get_interactive_window(
         user_id, thread_id, chat_id=message.chat.id
     )
@@ -541,6 +520,29 @@ async def _forward_message(
             "not forwarded. Type again to message the agent.",
         )
         return
+
+    success, err_message = await send_telegram_to_window(
+        user_id, window_id, thread_id, text, message.chat.id
+    )
+    if not success:
+        await safe_reply(message, f"\u274c {err_message}")
+        return
+
+    await ack_reaction(client, message.chat.id, message.message_id)
+
+    # Lazy: command_history cycle — same as status_bar_actions sites.
+    from ..command_history import record_command
+
+    record_command(user_id, thread_id, text)
+
+    # Start background capture for ! bash command output
+    if text.startswith("!") and len(text) > 1:
+        bash_cmd = text[1:]  # strip leading "!"
+        task = asyncio.create_task(
+            _capture_bash_output(client, user_id, thread_id, window_id, bash_cmd)
+        )
+        task.add_done_callback(task_done_callback)
+        _bash_capture_tasks[(user_id, thread_id)] = task
 
 
 async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:

@@ -527,6 +527,9 @@ class TestForwardMessage:
         assert any(k == "Escape" for _, k in sent_keys)
         # Interactive mode was cleared (not refreshed)
         assert cleared, "clear_interactive_mode should have been called"
+        # The text never reached the pane: no modal can treat it as an
+        # answer and no stale mode can hand it to the agent
+        assert _mock_send.await_count == 0, "text must not be forwarded"
 
     @patch(
         f"{_TH}.send_telegram_to_window",
