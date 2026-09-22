@@ -59,7 +59,24 @@ the live .env before deploy). Remaining observation: the first real
 agent re-key should log dead_session_topic_retained and produce NO
 deletion; auto-skip fires on the anti-vocale should stop (cap 16MB).
 
-## Definition of done
+## Mac closure (2026-09-22, cc-config handoff, verified by bird)
+
+Mac redeployed on fork/main feadb4ef (4.11.3.dev39, tool install with
+ext), env knobs applied with backup, all three code markers verified in
+the tool venv by bird independently. Re-key done on four panes
+(local_ai, mnemosyne, hermes-fleet, scalpel) with real SessionStart and
+new topics 16956/16976/16982/16998; planner pending its idle. The five
+legacy wN:t1 keys stay retained (they predate the digest era: the Mac
+ran ccgram 4.3.11 until Sep 21, which is where those keys and the
+[14,15,16] protocol set came from); the durable fold cannot map them
+because they are not herdr-session-v1 digests, so those five topics are
+replaced by the new ones, not re-linked. Zero deletions since the knob
+landed (the one cleanup line in the log predates today's redeploy).
+Also found by cc-config: the Mac guard's pgrep matches the operator's
+ssh command line containing 'ccgram' (double-kickstart race); the
+durable fix is a time gate or concatenated label, owned by cc-config
+with the guard script.
+
 
 Battery + lint + pyright green; code-review high on the diff; commit
 with gates; push mine/fork/main; deploy bird and verify the knob is
