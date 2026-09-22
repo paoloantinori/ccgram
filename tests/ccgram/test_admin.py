@@ -195,6 +195,51 @@ class TestRethread:
         assert "already bound" in result["detail"]
 
 
+class TestOwnershipAndTruncation:
+    async def test_unbind_rejects_foreign_owner(self) -> None:
+        thread_router.bind_thread(1, 100, "@7", chat_id=42)
+        result = await execute_admin_command(
+            _record("unbind", user_id=2, chat_id=42, thread_id=100),
+            client=MagicMock(),
+        )
+        assert not result["ok"]
+        assert "another user" in result["detail"]
+        assert thread_router.get_window_for_chat_thread(42, 100) == "@7"
+
+    async def test_rethread_rejects_foreign_owner(self) -> None:
+        thread_router.bind_thread(1, 100, "@7", chat_id=42)
+        result = await execute_admin_command(
+            _record(
+                "rethread",
+                user_id=2,
+                chat_id=42,
+                from_thread=100,
+                to_thread=200,
+            ),
+            client=MagicMock(),
+        )
+        assert not result["ok"]
+        assert "another user" in result["detail"]
+
+    def test_truncation_skips_to_eof_instead_of_replaying(self, tmp_path) -> None:
+        import json as _json
+
+        path = tmp_path / "admin_commands.jsonl"
+        records = [
+            _json.dumps(_record("unbind", user_id=1, chat_id=2, thread_id=i)) + "\n"
+            for i in range(5)
+        ]
+        path.write_text("".join(records))
+        first, offset = read_new_commands(path, 0)
+        assert len(first) == 5
+
+        # Rotated to a smaller retained history: no replay, jump to EOF.
+        path.write_text("".join(records[:2]))
+        again, offset2 = read_new_commands(path, offset)
+        assert again == []
+        assert offset2 == path.stat().st_size
+
+
 class TestWaitForResult:
     def test_wait_finds_matching_result(self, tmp_path) -> None:
         append_admin_result({"id": "cmd-9", "ok": True, "detail": "done"})

@@ -630,6 +630,33 @@ class TestDeadWindowTopicDeleted:
             bot.delete_forum_topic.assert_not_awaited()
             assert router.get_window_for_chat_thread(42, 100) == "@0"
 
+    async def test_not_dead_exit_clears_marker_with_retention_on(self, monkeypatch):
+        """A live or unverifiable window keeps retry semantics: the dead
+        marker is cleared so a later real death is still detected."""
+        from ccgram.handlers.polling.polling_state import lifecycle_strategy
+
+        bot = AsyncMock(spec=Bot)
+        router = ThreadRouter(
+            schedule_save=lambda: None,
+            has_window_state=lambda _window_id: False,
+        )
+        router.bind_thread(1, 100, "@0", chat_id=42)
+        with (
+            patch("ccgram.handlers.polling.window_tick.apply.thread_router", router),
+            patch(
+                "ccgram.handlers.polling.window_tick.apply.window_presence",
+                new_callable=AsyncMock,
+                return_value=None,
+            ),
+            patch(
+                "ccgram.handlers.polling.window_tick.apply._AUTODELETE_DEAD_TOPICS",
+                False,
+            ),
+        ):
+            await _handle_dead_window_notification(bot, 1, 100, "@0")
+
+        assert (1, 100, "@0") not in lifecycle_strategy._dead_notified
+
     @pytest.mark.parametrize("presence_value", [True, None], ids=["present", "unknown"])
     async def test_unconfirmed_presence_clears_marker_without_deletion(
         self, presence_value
