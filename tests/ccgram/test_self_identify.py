@@ -279,7 +279,7 @@ class TestLocatePrimaryWindowThroughResolver:
         monkeypatch.setenv("HERDR_PANE_ID", "w2:p1")
         monkeypatch.setattr(
             "ccgram.hook._resolve_herdr_target_id",
-            lambda _workspace, _pane, _provider: "herdr-session-v1-target",
+            lambda _workspace, _pane, _provider, _sid=None: "herdr-session-v1-target",
         )
         from ccgram.hook import _locate_primary_window
 
@@ -296,7 +296,7 @@ class TestLocatePrimaryWindowThroughResolver:
         monkeypatch.setenv("HERDR_PANE_ID", "w2:p1")
         monkeypatch.setattr(
             "ccgram.hook._resolve_herdr_target_id",
-            lambda _workspace, _pane, _provider: None,
+            lambda _workspace, _pane, _provider, _sid=None: None,
         )
         from ccgram.hook import _locate_primary_window
 

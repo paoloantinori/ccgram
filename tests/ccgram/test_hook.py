@@ -1073,6 +1073,65 @@ class TestNestedHookEndToEnd:
         assert (tmp_path / "session_map.json").exists()
 
 
+class TestHerdrPayloadSidCorrection:
+    """The socket snapshot's session value can disagree with the firing
+    session; the payload sid wins (2026-09-22 mnemosyne incident)."""
+
+    def _session(self, value: str) -> dict:
+        return {
+            "source": "herdr:claude",
+            "agent": "claude",
+            "kind": "id",
+            "value": value,
+        }
+
+    def test_agreeing_value_keeps_snapshot_target(self) -> None:
+        from ccgram.hook import _herdr_target_for_payload_sid
+        from ccgram.multiplexer.herdr import (
+            HerdrSessionComposite,
+            herdr_session_target_id,
+        )
+
+        snapshot = herdr_session_target_id(
+            HerdrSessionComposite(
+                source="herdr:claude", agent="claude", kind="id", value="sid-a"
+            )
+        )
+        result = _herdr_target_for_payload_sid(
+            snapshot, self._session("sid-a"), "sid-a"
+        )
+        assert result == snapshot
+
+    def test_divergent_value_uses_payload_sid(self) -> None:
+        from ccgram.hook import _herdr_target_for_payload_sid
+        from ccgram.multiplexer.herdr import (
+            HerdrSessionComposite,
+            herdr_session_target_id,
+        )
+
+        snapshot = herdr_session_target_id(
+            HerdrSessionComposite(
+                source="herdr:claude", agent="claude", kind="id", value="stale"
+            )
+        )
+        expected = herdr_session_target_id(
+            HerdrSessionComposite(
+                source="herdr:claude", agent="claude", kind="id", value="real"
+            )
+        )
+        result = _herdr_target_for_payload_sid(snapshot, self._session("stale"), "real")
+        assert result == expected
+        assert result != snapshot
+
+    def test_missing_payload_sid_keeps_snapshot_target(self) -> None:
+        from ccgram.hook import _herdr_target_for_payload_sid
+
+        result = _herdr_target_for_payload_sid(
+            "snapshot-target", self._session("stale"), None
+        )
+        assert result == "snapshot-target"
+
+
 class TestHerdrForensicsLog:
     def test_herdr_key_appends_key_and_sid(self, monkeypatch, tmp_path) -> None:
         monkeypatch.setenv("CCGRAM_DIR", str(tmp_path))

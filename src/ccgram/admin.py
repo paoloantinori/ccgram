@@ -201,12 +201,17 @@ async def _cmd_bind(command_id: str, args: dict) -> dict:
     from .thread_router import thread_router
 
     presence = await window_presence(window_id, multiplexer)
-    if presence is False:
+    if presence is not True:
+        # Confirmed dead OR unknown (backend unreachable, or an id outside
+        # this backend's namespace, which is how a truncated id looks):
+        # refuse. An explicit-request bind must still name a window the
+        # backend actually attests (2026-09-22: a truncated digest bound
+        # through the previous unknown-passes hole).
         return _result(
             command_id,
             "bind",
             False,
-            f"window {window_id} is not live",
+            f"window {window_id} is not confirmed live (presence: {presence})",
         )
     previous = thread_router.get_window_for_chat_thread(
         values["chat_id"], values["thread_id"]
@@ -260,7 +265,7 @@ async def _cmd_unbind(command_id: str, args: dict, client: Any) -> dict:
         )
         # Only an actual close (or the topic already being gone) counts
         # as success; protected, failed, and retryable outcomes surface.
-        ok = outcome in {"closed", "already_gone"}
+        ok = outcome in {"closed", "already_gone", "deleted"}
         return _result(
             command_id,
             "unbind",

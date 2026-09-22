@@ -722,6 +722,7 @@ def _resolve_herdr_target_id(
     workspace_id: str,
     pane_id: str,
     provider_name: ProviderName | None = None,
+    payload_session_id: str | None = None,
 ) -> str | None:
     """Resolve one exact Herdr locator to a guarded opaque session target.
 
@@ -729,6 +730,15 @@ def _resolve_herdr_target_id(
     snapshot must contain exactly one complete session record for this
     ``(workspace_id, pane_id)`` pair. Hooks from a nested agent are rejected
     when their provider differs from the live agent occupying that pane.
+
+    When the hook payload carries the firing session's id, the target is
+    derived from THAT id rather than the snapshot's session value: the
+    socket snapshot has been observed serving a composite that does not
+    match the live session (2026-09-22 mnemosyne incident: map key
+    7619d5fd... was written for sid d0ca41b1..., whose true digest is
+    1c542ecd..., which is what the CLI listing serves). A mismatched key
+    is pruned by the next reconcile and the session is orphaned, so the
+    payload sid is authoritative for the session identity.
     """
     agents = _herdr_agent_list_snapshot()
     if agents is None:
@@ -767,7 +777,49 @@ def _resolve_herdr_target_id(
         )
         return None
 
-    return _target_id_from_herdr_snapshot(record, agents)
+    target_id = _target_id_from_herdr_snapshot(record, agents)
+    if target_id is None:
+        return None
+    return _herdr_target_for_payload_sid(target_id, agent_session, payload_session_id)
+
+
+def _herdr_target_for_payload_sid(
+    snapshot_target: str,
+    agent_session: object,
+    payload_session_id: str | None,
+) -> str | None:
+    """Prefer the payload session id when the snapshot digest disagrees.
+
+    Returns the snapshot target unchanged when they agree (or when either
+    side is missing); otherwise returns the target derived from the
+    payload sid under the snapshot composite's own source/agent/kind.
+    """
+    if not payload_session_id or not isinstance(agent_session, dict):
+        return snapshot_target
+    snapshot_value = agent_session.get("value")
+    if snapshot_value == payload_session_id:
+        return snapshot_target
+    # Lazy: the digest helper lives behind the multiplexer adapter.
+    from .herdr_targets import HerdrSessionComposite, herdr_session_target_id
+
+    composite = HerdrSessionComposite(
+        source=str(agent_session.get("source") or ""),
+        agent=str(agent_session.get("agent") or ""),
+        kind=str(agent_session.get("kind") or ""),
+        value=payload_session_id,
+    )
+    try:
+        payload_target = herdr_session_target_id(composite)
+    except Exception:  # noqa: BLE001  # malformed composite: keep snapshot
+        logger.warning("herdr payload-sid correction skipped: incomplete composite")
+        return snapshot_target
+    logger.warning(
+        "herdr snapshot digest does not match the firing session; "
+        "using the payload sid (snapshot value %s, payload sid %s)",
+        snapshot_value,
+        payload_session_id,
+    )
+    return payload_target
 
 
 def _target_id_from_herdr_snapshot(
@@ -1442,7 +1494,9 @@ def _locate_primary_window(
         herdr_query=lambda workspace_id, pane_id: (
             herdr_target_id
             if use_herdr_snapshot
-            else _resolve_herdr_target_id(workspace_id, pane_id, provider_name)
+            else _resolve_herdr_target_id(
+                workspace_id, pane_id, provider_name, session_id
+            )
         ),
     )
     if identity is None:

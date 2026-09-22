@@ -107,7 +107,30 @@ class TestBind:
                 client=MagicMock(),
             )
         assert not result["ok"]
-        assert "not live" in result["detail"]
+        assert "not confirmed live" in result["detail"]
+        assert thread_router.get_window_for_chat_thread(42, 100) is None
+
+    async def test_bind_unknown_presence_refused(self) -> None:
+        with (
+            patch(
+                "ccgram.multiplexer.reconciliation.window_presence",
+                new_callable=AsyncMock,
+                return_value=None,
+            ),
+            patch("ccgram.multiplexer.multiplexer"),
+        ):
+            result = await execute_admin_command(
+                _record(
+                    "bind",
+                    user_id=1,
+                    chat_id=42,
+                    thread_id=100,
+                    window_id="herdr-session-v1-truncated",
+                ),
+                client=MagicMock(),
+            )
+        assert not result["ok"]
+        assert "not confirmed live" in result["detail"]
         assert thread_router.get_window_for_chat_thread(42, 100) is None
 
     async def test_bind_missing_argument(self) -> None:

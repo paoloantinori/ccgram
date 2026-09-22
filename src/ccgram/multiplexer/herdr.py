@@ -31,7 +31,6 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-import hashlib
 import json
 import os
 import re
@@ -49,7 +48,12 @@ from pathlib import Path
 
 import structlog
 
-from ..herdr_targets import HERDR_SESSION_TARGET_PREFIX, is_herdr_session_target
+from ..herdr_targets import (
+    HerdrSessionComposite,
+    canonical_session_bytes,
+    herdr_session_target_id,
+    is_herdr_session_target,
+)
 from .base import (
     AgentStatus,
     CaptureResult,
@@ -230,16 +234,6 @@ class HerdrAmbiguousTargetError(HerdrError):
 
 
 @dataclass(frozen=True)
-class HerdrSessionComposite:
-    """The complete input for an opaque Herdr target identity."""
-
-    source: str
-    agent: str
-    kind: str
-    value: str
-
-
-@dataclass(frozen=True)
 class HerdrLiveRecord:
     """One detected agent and its short-lived current Herdr locator."""
 
@@ -277,29 +271,6 @@ def _session_composite(record: Mapping[str, object]) -> HerdrSessionComposite | 
         kind=values["kind"] or "",
         value=values["value"] or "",
     )
-
-
-def canonical_session_bytes(composite: HerdrSessionComposite) -> bytes:
-    """Return canonical UTF-8 bytes for a complete session composite."""
-    values = {
-        "source": composite.source,
-        "agent": composite.agent,
-        "kind": composite.kind,
-        "value": composite.value,
-    }
-    if any(not isinstance(value, str) or not value for value in values.values()):
-        raise HerdrMalformedRecordError("session composite is incomplete")
-    # Field order is part of the persisted target-ID protocol. A golden test
-    # pins it so refactors cannot silently orphan existing topic bindings.
-    payload = json.dumps(values, ensure_ascii=False, separators=(",", ":"))
-    return payload.encode("utf-8")
-
-
-def herdr_session_target_id(composite: HerdrSessionComposite) -> str:
-    """Return the opaque versioned ID for a complete session composite."""
-    prefix = b"ccgram-herdr-session-v1\0"
-    digest = hashlib.sha256(prefix + canonical_session_bytes(composite)).hexdigest()
-    return f"{HERDR_SESSION_TARGET_PREFIX}{digest}"
 
 
 def _parse_live_record(record: Mapping[str, object]) -> HerdrLiveRecord | None:

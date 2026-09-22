@@ -6,6 +6,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 HERDR = ROOT / "src/ccgram/multiplexer/herdr.py"
+TARGETS = ROOT / "src/ccgram/herdr_targets.py"
 
 
 # Layout/volatile record fields must never feed a session composite.
@@ -13,15 +14,23 @@ FORBIDDEN = ("focused", "title", "cwd", "directory", "screen", "layout")
 
 
 def test_one_canonical_digest_owner_and_no_layout_identity() -> None:
-    source = HERDR.read_text()
-    assert source.count("def herdr_session_target_id(") == 1
-    assert "def canonical_session_bytes(" in source
+    # The digest builders live in the pure herdr_targets module (one
+    # canonical owner, importable by the hook without crossing the
+    # backend boundary); the adapter re-exports and must not redefine.
+    targets = TARGETS.read_text()
+    assert targets.count("def herdr_session_target_id(") == 1
+    assert targets.count("def canonical_session_bytes(") == 1
+    adapter = HERDR.read_text()
+    assert "def herdr_session_target_id(" not in adapter
+    assert "def canonical_session_bytes(" not in adapter
     # Identity comes from the complete agent_session composite, not layout data.
     # The region stops at ``_parse_live_record``: that is the record assembler,
     # which legitimately carries locators and cwd alongside the identity it
     # derives. Its identity derivation is guarded by the next test instead.
-    identity_section = source[
-        source.index("def _session_composite") : source.index("def _parse_live_record")
+    identity_section = adapter[
+        adapter.index("def _session_composite") : adapter.index(
+            "def _parse_live_record"
+        )
     ]
     for forbidden in FORBIDDEN:
         assert forbidden not in identity_section
