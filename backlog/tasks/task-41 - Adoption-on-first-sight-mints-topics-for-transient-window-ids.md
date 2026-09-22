@@ -1,7 +1,7 @@
 ---
 id: TASK-41
 title: Adoption on first sight mints topics for transient window ids
-status: In Progress
+status: Done
 assignee: []
 created_date: '2026-09-22 11:20'
 updated_date: '2026-09-22 11:20'
@@ -59,3 +59,15 @@ with gates; push mine/fork/main; deploy bird and verify the service;
 Mac rides the next cc-config redeploy. Upstream contribution only
 after explicit user approval (candidate: the incident is upstream
 behavior with real evidence).
+
+## Closure (2026-09-22 12:05)
+
+Shipped as 3f5b3a3e: battery 7333, ruff+pyright clean, code-review
+high verdict "correct, no blocking findings" (gate coverage, no dict
+leak, fresh monitor per test, rebind starts a fresh clock; its two
+minor items applied: dead test patch removed, formatting). Pushed
+mine/fork/main, deployed bird, marker verified in the tool venv,
+service clean. Production proof of the TASK-40 knob on the same
+sweep: 4 dead_session_topic_retained (re-keys retained instead of
+deleted), 0 deletions and 0 auto-skips since both knobs landed. Mac
+gets the debounce with the next cc-config redeploy.
