@@ -65,4 +65,6 @@ Battery + lint + pyright green; code-review high on the diff; commit
 with gates; push mine/fork/main; deploy bird and verify the knob is
 read (log line dead_session_topic_retained on the next re-key, no
 further topic deletions); upstream contribution only after explicit
-user approval (not covered by earlier blanket).
+user approval (not covered by earlier blanket). APPROVED and
+sent 2026-09-22: issue #272 + PR 273 (branch
+fix/autodelete-dead-topics, 6a82ff13, battery 7278).

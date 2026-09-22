@@ -61,3 +61,27 @@ comments, CI), answer every substantive comment, iterate to merge or
 close. When a maintainer requests changes, prefer additive commits over
 force-pushes. Note: the session-only watcher in the Ccgram-mac session
 polls every 9 minutes; if that session is gone, poll with gh on resume.
+
+
+## 2026-09-22: the missed candidates sent (user-approved)
+
+Audit of fork vs upstream (38 ahead, 0 behind) found two fixes never
+contributed; user approved sending both.
+
+- PR 271 (closes #270): the TASK-13 event-stream pair (cae27962,
+  branch fix/herdr-event-stream-reprime). Upstream-owned code still
+  re-primes every ~5s/15s with per-pane agent_status forks (~2.6
+  herdr calls/s measured at 17 windows) and carries the three edge
+  defects (dropped terminal event on mapping-change refresh,
+  ack-timeout erasing the first-connect prime, EOF leaking
+  RuntimeError). The 3b9c4c51 assertion-weakening was NOT ported;
+  the public-api test now asserts the fail-closed HerdrError
+  discovery contract. Branch battery 7282.
+- PR 273 (closes #272): the TASK-40 autodelete knob (6a82ff13,
+  branch fix/autodelete-dead-topics), code files only, branch
+  battery 7278.
+
+PR family now 263/264/265/266/268/271/273; issues 260/261/262/267/
+270/272. Cosmetic fork-only gates (QUIET_ENDED, TOPIC_EMOJO) and
+SKIP_BACKLOG_ON_START stay uncontributed by decision (low value /
+#245 family).
