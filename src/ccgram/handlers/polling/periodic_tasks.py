@@ -66,9 +66,7 @@ async def run_periodic_tasks(
             await cleanup_retired_topics(
                 client,
                 exclude_reasons=(
-                    None
-                    if _AUTODELETE_DEAD_TOPICS
-                    else frozenset({"session_closed"})
+                    None if _AUTODELETE_DEAD_TOPICS else frozenset({"session_closed"})
                 ),
             )
         log_throttle_sweep()
