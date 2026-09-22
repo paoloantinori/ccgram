@@ -76,6 +76,8 @@ async def _detect(monitor: SessionMonitor, session_map: dict) -> None:
     # Adoption is gated on the backend's verdict from the current listing, which
     # the monitor loop derives before reaching this call. These windows are live
     # and on tmux every live window is adoptable, so mirror that here.
+    # This helper drives the session-map delta path, which does not read
+    # the adoption debounce constant.
     with patch.object(
         monitor,
         "_load_current_session_map",
