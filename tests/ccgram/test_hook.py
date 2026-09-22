@@ -1073,6 +1073,32 @@ class TestNestedHookEndToEnd:
         assert (tmp_path / "session_map.json").exists()
 
 
+class TestHerdrForensicsLog:
+    def test_herdr_key_appends_key_and_sid(self, monkeypatch, tmp_path) -> None:
+        monkeypatch.setenv("CCGRAM_DIR", str(tmp_path))
+        from ccgram.hook import _append_herdr_forensics
+
+        _append_herdr_forensics(
+            "herdr:herdr-session-v1-abc", "602bb556-76d0-44c0-b755-2f6ef5fa8437"
+        )
+        _append_herdr_forensics("ccgram:@6", "should-not-appear")
+
+        log = (tmp_path / "hook_forensics.log").read_text()
+        assert "key=herdr:herdr-session-v1-abc" in log
+        assert "sid=602bb556-76d0-44c0-b755-2f6ef5fa8437" in log
+        assert "should-not-appear" not in log
+
+    def test_forensics_failure_never_raises(self, monkeypatch, tmp_path) -> None:
+        # A file where the ccgram dir should be: mkdir raises, the hook
+        # must swallow it.
+        blocked = tmp_path / "blocked"
+        blocked.write_text("not a dir")
+        monkeypatch.setenv("CCGRAM_DIR", str(blocked))
+        from ccgram.hook import _append_herdr_forensics
+
+        _append_herdr_forensics("herdr:x", "sid")  # must not raise
+
+
 class TestProviderFromPaneTty:
     @pytest.mark.parametrize(
         ("foreground_command", "provider"),

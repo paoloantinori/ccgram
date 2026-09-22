@@ -21,6 +21,7 @@ import re
 import shlex
 import subprocess
 import structlog
+import time
 import sys
 from pathlib import Path
 from collections.abc import Callable
@@ -1177,10 +1178,41 @@ def _update_session_map(
                     session_id,
                     cwd,
                 )
+                _append_herdr_forensics(session_window_key, session_id)
             finally:
                 fcntl.flock(lock_f, fcntl.LOCK_UN)
     except OSError:
         logger.exception("Failed to write session_map")
+
+
+def _append_herdr_forensics(session_window_key: str, session_id: str) -> None:
+    """Record every herdr entry write beside its payload session id.
+
+    2026-09-22 incident: one persisted entry carried a map key whose digest
+    did not match the digest of its own session id (the snapshot the hook
+    hashed was not the live session), and no reproduction captured the
+    culprit value. This durable pairing makes the next occurrence
+    self-documenting: digest(session_id) computed offline against the key
+    exposes the divergence with the exact two values. Best effort: a write
+    failure never blocks the hook.
+    """
+    if not session_window_key.startswith("herdr:"):
+        return
+    try:
+        # Lazy: same hook fast-path rationale as _write_event.
+        from .utils import ccgram_dir
+
+        line = (
+            f"{time.strftime('%Y-%m-%dT%H:%M:%S')} "
+            f"key={session_window_key} sid={session_id}\n"
+        )
+        path = ccgram_dir() / "hook_forensics.log"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+        with os.fdopen(fd, "a") as forensics_f:
+            forensics_f.write(line)
+    except OSError:
+        logger.debug("herdr forensics append failed", exc_info=True)
 
 
 def _record_pending_pi_replay(session_id: str) -> None:
