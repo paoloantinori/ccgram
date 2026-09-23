@@ -85,3 +85,17 @@ PR family now 263/264/265/266/268/271/273; issues 260/261/262/267/
 270/272. Cosmetic fork-only gates (QUIET_ENDED, TOPIC_EMOJO) and
 SKIP_BACKLOG_ON_START stay uncontributed by decision (low value /
 #245 family).
+
+
+## 2026-09-23: maintainer awake - v4.11.3 released, family endorsed, admin withdrawn
+
+Upstream released v4.11.3 (auto-detect multiplexer default: herdr >
+tmux > agterm from env vars; CCGRAM_MULTIPLEXER=auto; omp provider
+merged; topic emoji TOML #269 merged). Issue #276 closed not-planned
+with an explicit endorsement of the root-cause family (#267/#268,
+#272/#273, #274/#275) as the intended fix; PR #277 closed in line.
+Remaining open upstream: 263, 264, 265, 266, 268, 271, 273, 275 (all
+MERGEABLE). Greptile re-swept at 10:16 with no new findings. NEXT:
+absorb v4.11.3 into fork/main (watch the CCGRAM_MULTIPLEXER=auto
+default on both hosts, ours is pinned explicitly so behavior is
+unchanged).

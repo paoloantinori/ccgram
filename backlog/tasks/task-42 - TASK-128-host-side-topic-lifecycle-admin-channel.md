@@ -38,3 +38,14 @@ local_ai.
   consumer verified, first sync closed 5 more; 12 legacy issues remain
   on the Mac by design (explicit retirement only). local_ai notified
   via herdr as requested (usage examples included).
+
+## Upstream verdict (2026-09-23)
+
+The maintainer CLOSED #276 as not planned: the identity/re-key
+root-cause family (#267/#268, #272/#273, #274/#275) is the fix he
+wants, and a file-based admin CLI is "too much surface to maintain"
+upstream. Topic binding stays Telegram-side there. PR #277 closed in
+line with it (with a takeaway comment: pin the retire outcome
+vocabulary in one place and test the exact set). The channel REMAINS
+on the fork permanently: it exists for exactly the multi-machine
+operation the maintainer does not need.
