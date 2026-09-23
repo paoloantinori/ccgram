@@ -99,3 +99,16 @@ MERGEABLE). Greptile re-swept at 10:16 with no new findings. NEXT:
 absorb v4.11.3 into fork/main (watch the CCGRAM_MULTIPLEXER=auto
 default on both hosts, ours is pinned explicitly so behavior is
 unchanged).
+
+
+## 2026-09-23 afternoon: THREE MERGED into v4.11.4; absorbed on both machines
+
+The maintainer squash-merged #263 (join bound), #265 (skip-barrier
+deadline), and #273 (AUTODELETE_DEAD_TOPICS) into v4.11.4 (no
+comments, no modifications). Remaining open: 264, 266, 268, 271, 275.
+v4.11.4 also carries the maintainer's own #278 and #254 (Codex
+approval choices). Absorbed into fork/main as 51dec9a4: the three
+squashes verified already-present by content equivalence, the four
+new commits cherry-picked clean. Battery 7377 exit=0, deployed bird
+(audit now 0 issues) and Mac (3 legacy issues by design), admin
+round-trip verified on both.
