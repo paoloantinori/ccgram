@@ -695,7 +695,7 @@ class TestDeadWindowTopicDeleted:
                 return_value=None,
             ),
             patch(
-                "ccgram.handlers.polling.window_tick.apply._AUTODELETE_DEAD_TOPICS",
+                "ccgram.config.config.autodelete_dead_topics",
                 False,
             ),
         ):
