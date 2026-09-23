@@ -11,6 +11,7 @@ from telegram.error import BadRequest, RetryAfter, TelegramError
 from ccgram.multiplexer.base import WindowRef
 from ccgram.session import SessionManager
 from ccgram.thread_router import thread_router
+from ccgram.window_state_store import window_store
 from ccgram.handlers.sync_command import _run_audit
 from ccgram.handlers.callback_data import CB_SYNC_DISMISS, CB_SYNC_FIX
 from ccgram.handlers.sync_command import (
@@ -2196,13 +2197,33 @@ class TestSyncAuditSeparatesLivenessFromAdoption:
         stopped qualifying for new adoption, look like a fixable ghost.
         """
         sm = SessionManager()
+        saved_bindings = {u: dict(t) for u, t in thread_router.thread_bindings.items()}
+        saved_chats = dict(thread_router.chat_thread_bindings)
+        saved_w2t = dict(thread_router._window_to_thread)
+        saved_cw2t = dict(thread_router._chat_window_to_thread)
         thread_router.bind_thread(1, 2, "REFUSED", chat_id=-100)
-
-        audit = sm.audit_state(
-            {"REFUSED", "ALLOWED"},
-            [("REFUSED", "elsewhere"), ("ALLOWED", "agent")],
-            {"ALLOWED"},
-        )
+        try:
+            audit = sm.audit_state(
+                {"REFUSED", "ALLOWED"},
+                [("REFUSED", "elsewhere"), ("ALLOWED", "agent")],
+                {"ALLOWED"},
+            )
+        finally:
+            # The global router and window store leak into every later
+            # test file in this process; without this restore the stale
+            # sweep of unrelated suites sees a binding nothing owns
+            # (v4.12.3 interference).
+            thread_router.thread_bindings.clear()
+            thread_router.thread_bindings.update(
+                {u: dict(t) for u, t in saved_bindings.items()}
+            )
+            thread_router.chat_thread_bindings.clear()
+            thread_router.chat_thread_bindings.update(saved_chats)
+            thread_router._window_to_thread.clear()
+            thread_router._window_to_thread.update(saved_w2t)
+            thread_router._chat_window_to_thread.clear()
+            thread_router._chat_window_to_thread.update(saved_cw2t)
+            window_store.window_states.pop("REFUSED", None)
 
         ghosts = [i for i in audit.issues if i.category == "ghost_binding"]
         assert not ghosts, "a live window is not a ghost merely by being excluded"

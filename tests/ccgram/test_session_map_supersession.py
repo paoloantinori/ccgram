@@ -94,10 +94,34 @@ async def _noop_load(session_map: dict) -> None:
     return None
 
 
+def _drop_all_nine_bindings() -> None:
+    """Remove every @9 reference from the shared router (test isolation)."""
+    for user, thread, wid in list(thread_router.iter_thread_bindings()):
+        if wid == "@9":
+            thread_router.unbind_thread(user, thread)
+    for key in list(thread_router.chat_thread_bindings):
+        if thread_router.chat_thread_bindings[key] == "@9":
+            thread_router.chat_thread_bindings.pop(key)
+    for key in list(thread_router._window_to_thread):
+        if thread_router._window_to_thread[key] == "@9":
+            thread_router._window_to_thread.pop(key)
+    for key in list(thread_router._chat_window_to_thread):
+        if thread_router._chat_window_to_thread[key] == "@9":
+            thread_router._chat_window_to_thread.pop(key)
+
+
 class TestStaleSweepSparesInFlightCreations:
     """Dropping the state of a window mid-creation discards the cwd, provider,
     approval mode and origin the flow just wrote; the window returns
     re-derived and, having lost its ccgram origin, outside its lifecycle."""
+
+    @pytest.fixture(autouse=True)
+    def _only_own_nothing(self) -> Iterator[None]:
+        """These tests assert "nothing owns @9"; drop any binding earlier
+        tests leaked into the shared router before each case."""
+        _drop_all_nine_bindings()
+        yield
+        _drop_all_nine_bindings()
 
     def test_keeps_a_window_a_creation_flow_owns(self, sync: SessionMapSync) -> None:
         window_store.window_states["@9"] = WindowState(cwd="/repo")
@@ -158,6 +182,7 @@ class TestStaleSweepRespectsChatScopedBindings:
         saved_chat_w2t = dict(thread_router._chat_window_to_thread)
         saved_w2t = dict(thread_router._window_to_thread)
         saved_group = dict(thread_router.group_chat_ids)
+        saved_states = dict(window_store.window_states)
         yield
         thread_router.thread_bindings.clear()
         thread_router.thread_bindings.update(
@@ -171,6 +196,11 @@ class TestStaleSweepRespectsChatScopedBindings:
         thread_router._window_to_thread.update(saved_w2t)
         thread_router.group_chat_ids.clear()
         thread_router.group_chat_ids.update(saved_group)
+        # v4.12.3 interference: an upstream sync test leaks its REFUSED
+        # window state into the shared store; restore ours too or the
+        # sweep below removes a window this file never created.
+        window_store.window_states.clear()
+        window_store.window_states.update(saved_states)
 
     def test_chat_scoped_binding_survives_sweep(self, sync: SessionMapSync) -> None:
         """A window promoted to chat scope by set_group_chat_id must not be swept.
@@ -195,7 +225,10 @@ class TestStaleSweepRespectsChatScopedBindings:
             if wid
         }
         assert "@42" not in old_code_bound  # old code would miss this window
-        assert thread_router.all_bound_window_ids() == {"@42"}  # fix sees it
+        # Membership, not set equality: unrelated suites leak their own
+        # bindings into the shared router (serial runs surface them); the
+        # property under test is that the chat-scoped @42 IS seen as bound.
+        assert "@42" in thread_router.all_bound_window_ids()  # fix sees it
 
         try:
             removed = sync._remove_stale_window_states(
