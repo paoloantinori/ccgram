@@ -39,6 +39,7 @@ from ...multiplexer.window_liveness import is_window_live, reset_window_liveness
 from ...utils import task_done_callback
 from ...tts import TtsSynthesisError, get_synthesizer, prepare_tts_text
 from ...window_query import is_tool_calls_hidden
+from ...window_state_ports import identity_state
 from ..status.status_bubble import (
     clear_status_message,
     convert_status_to_content,
@@ -537,6 +538,7 @@ def _can_merge_tasks(base: ContentTask, candidate: MessageTask) -> bool:
         base.is_backlog_notice
         or candidate.is_backlog_notice
         or base.source_session_id != candidate.source_session_id
+        or base.source_provider_name != candidate.source_provider_name
         or base.content_type != "text"
         or candidate.content_type != "text"
         or base.tool_use_id is not None
@@ -632,6 +634,7 @@ async def _merge_content_tasks(
             delivery_receipts=tuple(merged_receipts),
             is_text_batch=True,
             source_session_id=first.source_session_id,
+            source_provider_name=first.source_provider_name,
             source_checkpoint=latest_source_checkpoint,
             enqueued_monotonic=oldest_enqueued_monotonic,
         ),
@@ -747,9 +750,23 @@ def _is_ghost_window_task_at_enqueue(window_id: str) -> bool:
 
 
 def _is_stale_task(user_id: int, task: MessageTask) -> bool:
-    """Return True when a queued task targets a confirmed-dead session."""
+    """Drop dead-window tasks or transcript content excluded by a manual choice."""
     if isinstance(task, StatusClearTask) or not task.window_id:
         return False
+    if (
+        isinstance(task, ContentTask)
+        and task.source_provider_name
+        and not identity_state.accepts_provider_observation(
+            task.window_id, task.source_provider_name
+        )
+    ):
+        logger.info(
+            "Dropping queued content excluded by manual provider selection",
+            window_id=task.window_id,
+            source_provider=task.source_provider_name,
+            source_session_id=task.source_session_id,
+        )
+        return True
     if not is_window_live(task.window_id):
         now = time.monotonic()
         log_key = (user_id, task.window_id)
@@ -1225,6 +1242,7 @@ async def enqueue_content_message(
     thread_id: int | None = None,
     chat_id: int | None = None,
     source_session_id: str | None = None,
+    source_provider_name: str | None = None,
     source_checkpoint: int | None = None,
     is_backlog_notice: bool = False,
 ) -> bool:
@@ -1252,6 +1270,7 @@ async def enqueue_content_message(
         chat_id=chat_id,
         delivery_receipts=(receipt,) if receipt is not None else (),
         source_session_id=source_session_id,
+        source_provider_name=source_provider_name,
         source_checkpoint=(
             source_checkpoint
             if source_checkpoint is not None

@@ -82,7 +82,7 @@ Backend-neutral terminal-multiplexer seam (mirrors the `providers/` seam). Calle
 - `state_persistence.py` — atomic/debounced JSON persistence for `state.json`.
 - `status_cmd.py` — `ccgram status`.
 - `telegram_request.py` — resilient long-polling helpers (custom HTTPX transport).
-- `thread_router.py` — thread bindings, display names, reverse index, chat ID resolution. Constructed by `SessionManager`; module-level `thread_router` is a proxy.
+- `thread_router.py` — thread bindings, display names, reverse index, chat ID resolution. Constructed by `SessionManager`; module-level `thread_router` is a proxy. New polling paths read the delivery chat through `session_query.resolve_chat_id`; `test_handler_layering_invariants` prohibits adding direct singleton access to `window_tick/__init__.py`.
 - `toolbar_config.py` — per-provider button grids from TOML.
 - `topic_state_registry.py` — registry for per-topic/per-window cleanup functions with self-registration decorator and `register_bound()` for instance methods.
 - `user_preferences.py` — directory favorites + per-user read offsets. Constructed by `SessionManager`; module-level `user_preferences` is a proxy.
@@ -109,7 +109,8 @@ Grouped into 14 feature subpackages. Each subpackage `__init__.py` re-exports th
 
 Top-level (constants, leaves, top-level commands):
 
-- `agent_command.py` — `/agent` (alias `/provider`) command for manual provider override. Picker UI with `(manual override)` badge + `🔄 Auto`. Sets `WindowState.provider_manual_override` so `_detect_and_apply_provider` skips the window; clears stale `transcript_path` and session_map entry so SessionMonitor stops polling the wrong transcript.
+- `agent_command.py` — `/agent` (alias `/provider`) command. Picker shows provider and Auto/Manual mode; manual choices must match the recognized live foreground process. Sets `WindowState.provider_manual_override` so `_detect_and_apply_provider` skips the window; reconciles the map entry against the live destination, retains only matching entries, and filters subsequent mismatched hooks while pinned. Auto repeats the check before releasing the pin.
+- `provider_display.py` — shared provider labels and compact Telegram topic prefixes.
 - `callback_data.py` — `CB_*` callback data constants.
 - `callback_helpers.py` — `user_owns_window`, `get_thread_id`.
 - `callback_registry.py` — prefix-based callback dispatch with self-registration decorator.
@@ -196,6 +197,7 @@ Top-level (constants, leaves, top-level commands):
 - `status_bubble.py` — keyboard + status message lifecycle (`_status_msg_info`, `send_status_text`, `clear_status_message`, `build_status_keyboard`).
 - `status_bar_actions.py` — button callbacks (last reply, get file, recall, esc, keys).
 - `topic_emoji.py` — topic name emoji updates (active/idle/done/dead + RC/YOLO badges), debounced. Color scheme via `CCGRAM_STATUS_MODE`.
+- `provider_switch.py` — stable provider-change observation, quiet notice, and retry/backoff.
 - `rc_probe.py` — Claude `/remote-control` outcome probe: `arm_rc_probe`, pure `classify_rc_output`, `_classify_loop`. De-duped via `WindowState.rc_probe_state` (in-memory).
 
 `handlers/text/` — `text_handler.py` (UI guards → unbound → dead → forward).
