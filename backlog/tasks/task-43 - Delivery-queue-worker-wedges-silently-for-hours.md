@@ -86,6 +86,44 @@ timeline (interactive session + join-budget expiry at 09:14, then
 total silence): something in the interactive-join neighborhood
 holding the per-user lock or an in-flight send that never settles.
 
+## Static elimination matrix (2026-09-26 evening, second pass)
+
+Every await reachable from _dispatch has been read and is bounded;
+every exception path logs. Eliminated as the sole cause:
+- All queue.join() callers (routing interactive join: wait_for 90s at
+  message_routing.py:206; shutdown drain: wait_for drain_timeout at
+  message_queue.py:1362). The join neighborhood is exonerated.
+- ResilientPollingHTTPXRequest (telegram_request.py): no retry loop;
+  single attempt, reset+raise; reset lock body sync; close shield
+  bounded by timeout(1.0). Exceptions propagate to dispatch which
+  logs them.
+- _ShardedUserQueue.get (message_queue.py:155): clear/pick/wait with
+  no await between clear and wait; single consumer per user (single
+  worker; get_or_create_queue respawns only when done). The classic
+  lost-wakeup requires pick to miss a present item; put_nowait is the
+  only adder and always sets _wake.
+- _coalesce_status_updates / _merge_content_tasks / purge paths: hold
+  the per-user lock over SYNCHRONOUS drain/refill bodies only.
+- rate_limit_send (message_sender.py:97): per-chat lock held over a
+  bounded sleep (3.1s group interval).
+- DraftStream: failure counters + TTL, bounded HTTP.
+- Facade task_done/_unfinished ledger: accounting drift can hang
+  join() but all joins are wait_for-bounded; drift cannot stop the
+  worker itself.
+- PTB send chain: HTTPXRequest timeouts (connect/write/read 10s).
+
+Conclusion: the 7h silent wedge is NOT reproducible as a single
+unbounded await in any path read; it requires either a state-
+corruption variant invisible to static reading (lost wakeup or
+accounting under a specific interleaving) or an await in PTB/
+uncommon dispatch branches not yet reached. The discriminating next
+step is the instrumented full-chain harness (real _dispatch + fake
+transport scripted to hang/raise per scenario) with per-seam entry
+tracing, which becomes practical at scale with pyteman TASK-178
+(entry events on coroutine targets). Seam (b) and (c) of the stub
+sweep remain the signature templates the instrumented run must
+match.
+
 ## Definition of done
 
 Reproduction harness + ruleset in repo (or as a documented script if
