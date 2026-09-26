@@ -124,6 +124,39 @@ tracing, which becomes practical at scale with pyteman TASK-178
 sweep remain the signature templates the instrumented run must
 match.
 
+## Instrumented findings (2026-09-26 night)
+
+pyteman TASK-178 landed; harness swapped to real rulesets for entry
+tracing (verified firing on async _dispatch in the foreign-project
+embedding). Two results:
+
+1. pyteman sleep action is time.sleep: on coroutine targets the
+   stall BLOCKS the event loop. Wrong shape for this wedge (loop
+   must stay alive); follow-up filed by pyteman as TASK-181. Harness
+   keeps the monkeypatch for the hang itself.
+
+2. Double-worker race (get_or_create_queue has no lock around
+   check-then-spawn; monitor + PTB handlers both call it): 30-round
+   interleaved sweep (content+status, 0.25s windows) shows FACADE
+   LEDGER LEAK under worker cancellation mid-dispatch. Mechanism:
+   coalesce/merge DRAIN sibling tasks out of the shards (their
+   put_nowait already counted +1 on _unfinished); the compensating
+   task_done calls run in the DISPATCH path AFTER the drain
+   (message_queue.py:823/831, dropped compensation; merge
+   compensation); a worker cancelled between drain and compensation
+   skips them, so _unfinished never returns to zero and the _drained
+   event (join authority) never sets again for the process lifetime.
+   Production corroboration: "Shutdown drain timeout: 2 queued
+   task(s) remain" in the 2026-09-20 journal is this leak observed
+   live. Join callers are wait_for-bounded, so the leak alone does
+   not stop DELIVERY; it corrupts the join signal until restart.
+
+   My 0.25s teardown caused the cancellations in the sweep; the open
+   question for the 7h wedge: which NON-shutdown path can cancel or
+   stall a worker mid-dispatch? Candidates to instrument next: the
+   respawn branch (worker .done() without shutdown), and any Base
+   that escapes the worker's except clauses.
+
 ## Definition of done
 
 Reproduction harness + ruleset in repo (or as a documented script if
