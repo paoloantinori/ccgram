@@ -1,6 +1,5 @@
 """Manual routing choices must survive independent hook ingestion paths."""
 
-import asyncio
 import json
 from unittest.mock import AsyncMock
 
