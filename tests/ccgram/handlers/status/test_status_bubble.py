@@ -1,5 +1,7 @@
 import ast
 import inspect
+import time
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -44,6 +46,19 @@ def _make_bot(send_id: int = 99) -> AsyncMock:
     sent.message_id = send_id
     bot.send_message.return_value = sent
     return bot
+
+
+@pytest.fixture(autouse=True)
+def _no_status_spacing(monkeypatch):
+    """Rapid-sequence tests: spacing off, clocks cleared each case."""
+    import ccgram.handlers.status.status_bubble as _sb
+
+    monkeypatch.setattr(_sb, "_STATUS_EDIT_MIN_INTERVAL_S", 0.0)
+    _sb._last_status_edit_at.clear()
+    _sb._pending_status_text.clear()
+    yield
+    _sb._last_status_edit_at.clear()
+    _sb._pending_status_text.clear()
 
 
 class TestSendStatusText:
@@ -686,3 +701,49 @@ class TestBuildStatusKeyboardGroupVsPrivate:
             _make_bot(78), USER_ID, 0, WINDOW_ID, "working"
         )
         mock_dash.assert_called_once_with(WINDOW_ID, USER_ID)
+
+
+class TestStatusEditSpacing:
+    """Same-window status edits are spaced; the latest text catches up."""
+
+    async def test_rapid_updates_coalesce_to_one_edit(self, monkeypatch) -> None:
+        import ccgram.handlers.status.status_bubble as _sb
+
+        _sb._last_status_edit_at.clear()
+        _sb._pending_status_text.clear()
+        _sb._status_msg_info.clear()
+        monkeypatch.setattr(_sb, "_STATUS_EDIT_MIN_INTERVAL_S", 60.0)
+
+        bot = AsyncMock()
+        bot.send_message.return_value = SimpleNamespace(message_id=99)
+        with patch.object(_sb, "edit_with_fallback", new_callable=AsyncMock) as edit:
+            edit.return_value = False  # first send creates, next spacing-suppresses
+            await _sb.send_status_text(bot, 1, 42, "@0", "Working")
+            _sb._status_msg_info[(1, 42)] = (50, "@0", "Working", CHAT_ID)
+            edit.return_value = True
+            await _sb.send_status_text(bot, 1, 42, "@0", "Waiting for input")
+        assert edit.await_count == 0, "suppressed inside the spacing window"
+        assert _sb._pending_status_text[(1, 42)] == "Waiting for input"
+
+    async def test_due_edit_shows_latest_suppressed_text(self, monkeypatch) -> None:
+        import ccgram.handlers.status.status_bubble as _sb
+
+        _sb._last_status_edit_at.clear()
+        _sb._pending_status_text.clear()
+        _sb._status_msg_info.clear()
+        monkeypatch.setattr(_sb, "_STATUS_EDIT_MIN_INTERVAL_S", 60.0)
+
+        bot = AsyncMock()
+        _sb._status_msg_info[(1, 42)] = (50, "@0", "old", CHAT_ID)
+        _sb._pending_status_text[(1, 42)] = "suppressed newer"
+        # Make the edit due: age the clock past the window.
+        _sb._last_status_edit_at[(1, 42)] = time.monotonic() - 120.0
+        with patch.object(_sb, "edit_with_fallback", new_callable=AsyncMock) as edit:
+            edit.return_value = True
+            await _sb.send_status_text(bot, 1, 42, "@0", "current call text")
+        shown = (
+            edit.await_args.args[3]
+            if edit.await_args.args
+            else edit.await_args.kwargs.get("text")
+        )
+        assert shown == "suppressed newer", "the latest suppressed state wins"

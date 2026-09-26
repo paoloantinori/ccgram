@@ -66,6 +66,19 @@ def _seed_todos(*todos: dict) -> None:
     )
 
 
+@pytest.fixture(autouse=True)
+def _no_status_spacing(monkeypatch):
+    """Rapid-sequence tests: spacing off, clocks cleared each case."""
+    import ccgram.handlers.status.status_bubble as _sb
+
+    monkeypatch.setattr(_sb, "_STATUS_EDIT_MIN_INTERVAL_S", 0.0)
+    _sb._last_status_edit_at.clear()
+    _sb._pending_status_text.clear()
+    yield
+    _sb._last_status_edit_at.clear()
+    _sb._pending_status_text.clear()
+
+
 class TestProcessStatusUpdate:
     @patch("ccgram.handlers.status.status_bubble.thread_router")
     async def test_appends_claude_task_list_to_status_text(self, mock_tr) -> None:

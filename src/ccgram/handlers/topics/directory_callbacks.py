@@ -260,8 +260,8 @@ async def _handle_fav(
         await query.answer("Directory no longer exists", show_alert=True)
         return
 
-    await _render_directory_browser(query, context, fav_path, user_id=user_id)
     await query.answer()
+    await _render_directory_browser(query, context, fav_path, user_id=user_id)
 
 
 async def _handle_star(
@@ -324,8 +324,8 @@ async def _handle_select(
         return
 
     new_path_str = str(new_path)
-    await _render_directory_browser(query, context, new_path_str, user_id=user_id)
     await query.answer()
+    await _render_directory_browser(query, context, new_path_str, user_id=user_id)
 
 
 async def _handle_up(
@@ -342,8 +342,8 @@ async def _handle_up(
     parent = current.parent
 
     parent_path = str(parent)
-    await _render_directory_browser(query, context, parent_path, user_id=user_id)
     await query.answer()
+    await _render_directory_browser(query, context, parent_path, user_id=user_id)
 
 
 async def _handle_home(
@@ -358,8 +358,8 @@ async def _handle_home(
         return
 
     home_path = str(Path.home())
-    await _render_directory_browser(query, context, home_path, user_id=user_id)
     await query.answer()
+    await _render_directory_browser(query, context, home_path, user_id=user_id)
 
 
 async def _handle_page(
@@ -379,6 +379,7 @@ async def _handle_page(
         await query.answer("Invalid data")
         return
     current_path = _current_browse_path(context)
+    await query.answer()
     await _render_directory_browser(
         query,
         context,
@@ -386,7 +387,6 @@ async def _handle_page(
         user_id=user_id,
         page=pg,
     )
-    await query.answer()
 
 
 def _subdir_within_repo(selected_path: str, repo_path: Path) -> str:

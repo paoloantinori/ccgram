@@ -12,6 +12,7 @@ Status-bar Row 1: [⎋ Esc] [📸 Screenshot] [📄 Last] [📥 Get File].
 from __future__ import annotations
 
 import contextlib
+import os
 import time
 
 import structlog
@@ -52,6 +53,31 @@ logger = structlog.get_logger()
 
 # Status message tracking: (user_id, thread_key) -> (message_id, window_id, last_text, chat_id)
 _status_msg_info: dict[tuple[int, int], tuple[int, str, str, int]] = {}
+# Same-window status-edit spacing (seconds). 0 disables. The latest
+# suppressed text is retained so the next due edit catches up to the
+# CURRENT status; intermediate spinner states are coalesced away.
+_STATUS_EDIT_MIN_INTERVAL_S = max(
+    0.0, float(os.getenv("CCGRAM_STATUS_EDIT_MIN_INTERVAL_S", "4"))
+)
+_last_status_edit_at: dict[tuple[int, int], float] = {}
+_pending_status_text: dict[tuple[int, int], str] = {}
+
+
+def _status_edit_due(skey: tuple[int, int]) -> bool:
+    """True when the last SAME-WINDOW status edit is older than the spacing."""
+    last = _last_status_edit_at.get(skey)
+    if last is None:
+        return True
+    return (time.monotonic() - last) >= _STATUS_EDIT_MIN_INTERVAL_S
+
+
+def reset_spacing_for_testing() -> None:
+    """Clear spacing state (tests exercising rapid sequences set the
+    interval to 0 via patching and clear the clocks between cases)."""
+    _last_status_edit_at.clear()
+    _pending_status_text.clear()
+
+
 _backlog_status_cache: dict[tuple[int, int, str], tuple[float, str]] = {}
 _BACKLOG_STATUS_THROTTLE_SECONDS = 15.0
 SEVERE_BACKLOG_COUNT = 100
@@ -386,7 +412,19 @@ async def send_status_text(
         msg_id, stored_wid, last_text, stored_chat_id = existing
         if stored_wid == window_id and text == last_text:
             return
+        if stored_wid == window_id and not _status_edit_due(skey):
+            # Status edits share the group flood budget with everything
+            # else; a spinner does not need second fidelity. Spacing
+            # same-window edits spends fewer group tokens, which is the
+            # single biggest lever for interactive UI latency (#281).
+            _pending_status_text[skey] = text
+            return
         if stored_wid == window_id:
+            pending = _pending_status_text.pop(skey, None)
+            if pending is not None and pending != text:
+                # A newer suppressed status arrived after this call's
+                # text was captured; the edit shows the latest state.
+                text = pending
             success = await edit_with_fallback(
                 client,
                 stored_chat_id,
@@ -397,6 +435,8 @@ async def send_status_text(
             )
             if success:
                 _status_msg_info[skey] = (msg_id, window_id, text, stored_chat_id)
+                _pending_status_text.pop(skey, None)
+                _last_status_edit_at[skey] = time.monotonic()
                 return
             # Edit failed — original message may still exist server-side.
             # Best-effort delete to avoid an orphan before creating a replacement.
@@ -416,6 +456,8 @@ async def send_status_text(
     )
     if msg is not None:
         _status_msg_info[skey] = (msg.message_id, window_id, text, chat_id)
+        _last_status_edit_at[skey] = time.monotonic()
+        _pending_status_text.pop(skey, None)
 
 
 async def clear_status_message(
