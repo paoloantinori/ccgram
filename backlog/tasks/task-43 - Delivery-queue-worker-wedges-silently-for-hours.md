@@ -1,7 +1,7 @@
 ---
 id: TASK-43
 title: Per-user delivery queue worker wedged silently for 7 hours (2026-09-26 incident)
-status: In Progress
+status: Done
 assignee: []
 created_date: '2026-09-26 17:35'
 updated_date: '2026-09-26 17:35'
@@ -244,3 +244,11 @@ upstream either).
 Reproduction harness + ruleset in repo (or as a documented script if
 too synthetic for the suite), root cause named with mechanism, fix
 with regression test, battery, deploy both bridges.
+
+All satisfied 2026-09-27: harnesses + probes committed
+(tools/diagnostics/task43), root cause named with verified mechanism
+and numbers, fix red-green verified, serial battery 7573 green with
+/simplify + code-review high gates run and landed, deployed and
+verified on bird (4.11.3.dev83+dev, started 09:08:42, zero journal
+errors, monitor polling) and Mac (4.11.3.dev83, agent restarted,
+fix present in the installed package).
