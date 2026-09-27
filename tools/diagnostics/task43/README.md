@@ -50,7 +50,18 @@ exact mix the restart destroyed; the fix removes the class entirely.
   empty deque); with the empty-deque guard it exits cleanly
   (pump_exception=None).
 
-pyteman integration: entry rulesets now fire on coroutine targets
-(pyteman TASK-178); tracing rules go in the run's PYTEMAN_RULES. The
-sleep action blocks the loop (TASK-181 pending), so loop-alive hangs
-stay on direct monkeypatch.
+pyteman integration: entry rulesets fire on coroutine targets
+(TASK-178) and, since TASK-181 (master ea9a378), a sleep action can
+declare `async: true` to suspend exactly one chain on asyncio.sleep
+while the loop keeps servicing everything else: the loop-alive
+wedge shape, no monkeypatch. Verified on the real checkout
+(2026-09-27): entry rule `{kind: sleep, ms: 60000, async: true}` on a
+coroutine target held the ticker at full 0.05s cadence while the
+target stayed suspended (dispatch_done=0); the plain sleep froze the
+whole run (max_gap 1.5s). Activation that works: PYTHONPATH must
+carry the directory CONTAINING sitecustomize.py (the pyteman
+checkout's src/pyteman, not src; an editable install alone does NOT
+activate), PYTEMAN_RULES points at the ruleset, PYTEMAN_LOG receives
+the firing records with the 'async': True marker; and the target must
+live in an importable module, not the run's __main__ script, or the
+rule patches a second copy nobody calls.

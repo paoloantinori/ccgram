@@ -134,7 +134,12 @@ embedding). Two results:
 1. pyteman sleep action is time.sleep: on coroutine targets the
    stall BLOCKS the event loop. Wrong shape for this wedge (loop
    must stay alive); follow-up filed by pyteman as TASK-181. Harness
-   keeps the monkeypatch for the hang itself.
+   keeps the monkeypatch for the hang itself. LATER RESOLVED:
+   TASK-181 landed (master ea9a378) with `async: true`, verified
+   2026-09-27 on the real checkout (one chain suspended, loop at
+   full cadence, 'async': True in the firing log; recipe in the
+   harness README); the native wedge repro is available for any
+   future incident.
 
 2. Double-worker race (get_or_create_queue has no lock around
    check-then-spawn; monitor + PTB handlers both call it): 30-round
