@@ -151,11 +151,27 @@ embedding). Two results:
    live. Join callers are wait_for-bounded, so the leak alone does
    not stop DELIVERY; it corrupts the join signal until restart.
 
-   My 0.25s teardown caused the cancellations in the sweep; the open
-   question for the 7h wedge: which NON-shutdown path can cancel or
-   stall a worker mid-dispatch? Candidates to instrument next: the
-   respawn branch (worker .done() without shutdown), and any Base
-   that escapes the worker's except clauses.
+   RETRACTED (2026-09-27, before any commit): the merge leak does
+   not exist. Merged siblings ARE compensated via
+   dispatch_state.extra_task_done, settled in _dispatch_with_retry's
+   finally (message_queue.py:1006). My sweep's cancellations landed
+   inside THAT finally's window, and my first fix double-compensated
+   (ValueError: task_done called too many times proved the original
+   accounting right). Code reverted, test removed, nothing shipped.
+   The coalesce drop compensation (dispatch-path, after the lock's
+   atomic return) stands as correct by the same analysis.
+
+   Remaining real candidate for the 7h silence: a worker alive but
+   parked forever on one await. The extra_task_done finally gives a
+   NEW window worth instrumenting: cancellation between the drain
+   (inside _merge_content_tasks) and the finally compensation is
+   handled, but a HANG (not cancel) of process_content_task between
+   them leaves the ledger high and the worker wedged with zero
+   sends - the exact signature. So the hunt narrows to: what can
+   hang _process_content_task / process_status_update mid-flight in
+   production with every HTTP timeout at 10s? Next: entry tracing
+   (pyteman rulesets now firing on coroutine targets) around those
+   two functions in the full-chain harness.
 
 ## Definition of done
 
