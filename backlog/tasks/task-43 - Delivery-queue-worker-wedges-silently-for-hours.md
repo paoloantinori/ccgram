@@ -35,13 +35,14 @@ immediately (offset settled at EOF via skip-backlog-on-start).
   must be an await that never resolves, not an exception path.
 - Candidates for an indefinite await with no log line:
   (a) the send awaiting the group rate-limiter scheduler token
-  forever (deployed 2026-09-25, c803e2a9: _PriorityGroupScheduler
+  forever (c803e2a9, in production from 08:12 on 2026-09-26:
+  _PriorityGroupScheduler
   pump wraps the aiolimiter bucket; a pump death or missed wakeup
   would stall exactly like this),
   (b) an HTTP request without effective timeout inside the send,
   (c) the interactive-join path holding the worker.
-- Timing correlates with the priority-scheduler deploy (first full
-  day of production traffic under it) AND with an interactive
+- Timing correlates with the priority-scheduler deploy (the freeze
+  began ~82 minutes after the swap onto it) AND with an interactive
   session the operator was actively driving.
 
 ## Plan (pyteman-first, per the tool's purpose)
@@ -172,6 +173,71 @@ embedding). Two results:
    production with every HTTP timeout at 10s? Next: entry tracing
    (pyteman rulesets now firing on coroutine targets) around those
    two functions in the full-chain harness.
+
+## Root cause found and fixed (2026-09-27)
+
+The 7h-silent wedge is the _PriorityGroupScheduler waiter-corpse bug
+(c803e2a9, committed 2026-09-26 08:09; service swapped onto it
+08:12 per the journal; freeze began 09:34, about 82 minutes of
+production exposure). Mechanism, traced end to end and verified
+experimentally (tools/diagnostics/task43: limiterstack.py,
+limiterstorm2.py, corpseasym.py):
+
+- acquire() parks a future in one of two deques. A requester cancelled
+  while parked left its cancelled future in the deque (the handler's
+  old comment "the pump never saw us; nothing to clean" is wrong).
+- The pump pops each future in FIFO order and BURNS a real token on a
+  corpse: `await self._limiter.acquire()` runs before the done-check,
+  so each corpse costs one token, 3s under flood saturation (group
+  bucket 20/60), with ZERO log lines.
+- Verified numbers: 60 cancelled parked waiters froze the background
+  lane for 185.7s while an interactive send was served in 2.5s;
+  worker alive, zero logs, pump alive. This is the incident
+  fingerprint: /screenshot (interactive lane) worked while queue
+  delivery starved (background lane), 09:34-16:40, offset frozen
+  exactly.
+- Incidence sources in production (all verified reachable): burst at
+  the end of the operator's interactive session 09:14-09:34 (arrow-key
+  debounce cancels in status_bar_actions, bash-capture cancels, draft
+  TTL aborts cancelling parked draft flushes whose payloads carry
+  chat_id, join-budget expiry), plus draft abort on every completed
+  assistant turn under flood saturation.
+
+Fix (this turn): acquire()'s CancelledError handler removes the
+waiter from its deque before re-raising; the pump's done-check stays
+as a lost-race backstop and no longer carries the token-burn branch.
+Removal exposed a second latent path (found by /simplify round +
+pumpautopsy.py probe): with corpses actually removed, total waiter
+cancellation while the pump awaits its token leaves both deques empty
+at wake time and the pump died on popleft(); guarded with an
+empty-deque re-check so the pump exits cleanly. Red-green verified:
+new regression test
+test_cancelled_waiter_burst_leaves_no_corpses fails on old code
+(both without corpse removal and without the pump guard), passes on
+fixed; post-fix probes show corpses_in_deque=0, background
+service 5.7s (was 185.7s), interactive 2.5s unchanged, pump-kill
+respawn unchanged.
+
+Honest residual: the corpus of corpses observed in the frozen window
+must have been replenished for 7h (an isolated burst drains at
+3s/corpse); the restart destroyed the in-memory deques, so the exact
+replenisher mix over 09:34-16:40 is unrecoverable. The fix removes
+the scheduler's vulnerability to ALL of them (a cancelled waiter no
+longer lingers), so no replenishment rate can sustain a wedge in this
+class. Known bound, accepted deliberately (code-review 2026-09-27):
+the cancellation-path cleanup is a deque.remove, O(n) per cancelled
+waiter, quadratic under a mass-cancellation storm of thousands of
+parked waiters; the scan is C-level identity comparisons on a cold
+path, and the storm size that would make it hurt is the storm the fix
+itself defuses. Revisit only if a probe ever shows scheduler-cleanup
+time mattering. Deployment on both bridges follows the DoD.
+
+Battery note: parallel worksteal runs flaked 3/9 (19-failure burst on
+the first run, two single-test flakes with different names); every
+failing name passes in isolation and serial is fully green 7573/7573,
+so the flakes are attributed to the known-flaky worksteal runner
+under machine load, not this change (clean tree is not immune
+upstream either).
 
 ## Definition of done
 
