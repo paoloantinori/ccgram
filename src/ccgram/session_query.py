@@ -34,6 +34,14 @@ def resolve_chat_id(user_id: int, thread_id: int | None = None) -> int:
     return thread_router.resolve_chat_id(user_id, thread_id)
 
 
+def iter_bound_topics() -> list[tuple[int, int | None, int, str]]:
+    """(user_id, chat_id, thread_id, window_id) for every bound topic."""
+    # Lazy: the router is installed by SessionManager during bootstrap.
+    from .thread_router import thread_router
+
+    return list(thread_router.iter_thread_bindings_with_chat())
+
+
 async def resolve_session_for_window(window_id: str) -> "ClaudeSession | None":
     """Resolve the Claude session for a tmux window, or None if not found."""
     # Lazy: session_resolver constructed per-call so tests can stub it

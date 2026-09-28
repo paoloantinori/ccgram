@@ -486,6 +486,11 @@ def reset_for_testing() -> None:
 
     # Lazy: each module's _reset_*_for_testing hook is only needed by the
     # test harness; production callers never reach reset_for_testing().
+    from .handlers.polling import delivery_watch
+
+    delivery_watch.reset_for_testing()
+
+    # Lazy: same test-only reset hook, kept out of the production import path.
     from .handlers.shell import shell_capture
 
     shell_capture._reset_approval_callback_for_testing()
