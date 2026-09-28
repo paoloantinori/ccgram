@@ -39,9 +39,7 @@ def _wire(monkeypatch, tmp_path, topics, deliveries) -> FakeTelegramClient:
             fenced=fenced,
         )
 
-    monkeypatch.setattr(
-        delivery_watch, "get_delivery_watermark", projection
-    )
+    monkeypatch.setattr(delivery_watch, "get_delivery_watermark", projection)
     return FakeTelegramClient()
 
 
@@ -136,9 +134,7 @@ class TestCheckDeliveryWedges:
         )
         monkeypatch.setattr(delivery_watch.time, "monotonic", lambda: 0.0)
         for now in (0.0, 301.0, 602.0):
-            monkeypatch.setattr(
-                delivery_watch.time, "monotonic", lambda n=now: n
-            )
+            monkeypatch.setattr(delivery_watch.time, "monotonic", lambda n=now: n)
             await check_delivery_wedges(client)
         await _flush_alert_tasks()
         assert client.call_count("send_message") == 0
@@ -175,9 +171,7 @@ class TestCheckDeliveryWedges:
     async def test_unresolved_chat_id_does_not_consume_the_alert(
         self, monkeypatch, tmp_path
     ) -> None:
-        topics: list[tuple[int, int | None, int, str]] = [
-            (7, None, 42, "@1")
-        ]
+        topics: list[tuple[int, int | None, int, str]] = [(7, None, 42, "@1")]
         client = _wire(
             monkeypatch,
             tmp_path,

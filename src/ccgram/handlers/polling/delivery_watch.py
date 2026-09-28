@@ -77,9 +77,7 @@ class DeliveryGapWatch:
 
     def observe(self, window_id: str, offset: int, size: int, now: float) -> bool:
         """Record one observation; True when the alarm should fire now."""
-        state = self._windows.setdefault(
-            window_id, _WindowWatch(last_offset=offset)
-        )
+        state = self._windows.setdefault(window_id, _WindowWatch(last_offset=offset))
 
         gap = max(size - offset, 0)
         if gap < self.gap_threshold or offset != state.last_offset:
@@ -183,9 +181,7 @@ async def _send_alert(
             await safe_send(
                 client,
                 chat_id,
-                ALERT_TEXT.format(
-                    gap_kb=gap / 1024, stuck=_watch.stuck_grace_s
-                ),
+                ALERT_TEXT.format(gap_kb=gap / 1024, stuck=_watch.stuck_grace_s),
                 message_thread_id=thread_id,
             )
     except Exception:
