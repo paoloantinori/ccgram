@@ -1,7 +1,7 @@
 ---
 id: TASK-45
 title: Early warning for silent delivery wedges (frozen offset while transcript grows)
-status: In Progress
+status: Done
 assignee: []
 created_date: '2026-09-27 17:05'
 updated_date: '2026-09-28 10:12'
@@ -80,3 +80,9 @@ transcript without any complete message settling a receipt; 64 KB /
 120s would page the operator on that benign burst. 256 KB / 300s
 still alarms on any real wedge of the TASK-43 class (1.8 MB
 unsettled, frozen 7h) within about five to six minutes.
+
+## Closure (2026-09-28)
+
+Both review gates ran and all findings landed; serial battery 7593
+green; deployed and verified on bird (4.11.3.dev87+dev, started
+11:41:28, zero journal errors) and Mac (4.11.3.dev87, clean startup).
