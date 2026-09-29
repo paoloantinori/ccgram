@@ -1,7 +1,7 @@
 ---
 id: TASK-46
 title: New-session launch died during dead-window reconciliation (2026-09-29 09:11)
-status: Open
+status: Done
 assignee: []
 created_date: '2026-09-29 09:30'
 updated_date: '2026-09-29 09:30'
@@ -128,3 +128,11 @@ reproduced, root cause named with mechanism and fixed with a
 regression test. -- Reproduced via live forensic evidence; root cause
 named with mechanism; fix + red-green regression tests in
 test_herdr_backend.py; gates and deploy follow.
+
+
+## Closure (2026-09-29)
+
+Both review gates ran with all findings landed or documented; serial
+battery 7596 green; deployed and verified on bird (4.11.3.dev91+dev,
+started 13:01:54, zero journal errors) and Mac (4.11.3.dev91+dev,
+clean startup). Commits 04cff201 + format follow-up, pushed as be7b076e.
