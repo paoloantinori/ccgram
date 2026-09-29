@@ -144,8 +144,22 @@ _CALL_TIMEOUT_SECONDS = 8.0
 
 # New Pi sessions have been observed to publish their agent_session in ~2.7s.
 # Keep creation discovery bounded, while allowing slow hook/integration startup.
-_CREATED_SESSION_DISCOVERY_TIMEOUT_SECONDS = 5.0
-_CREATED_SESSION_POLL_INTERVAL_SECONDS = 0.1
+# A freshly launched agent must publish its session within this budget
+# for topic creation to commit. Boot under load (zai wrapper env block +
+# claude startup) has been measured past 5s (2026-09-29, TASK-46), and
+# creation waits for the stable session-backed identity, not the
+# terminal fallback, so the budget has to cover real boot time. The
+# poll interval stays a coarse 0.5s: each poll is a full agent.list
+# subprocess, and a 20s window at 0.1s would spawn it ~200 times per
+# slow launch.
+_CREATED_SESSION_DISCOVERY_TIMEOUT_SECONDS = 20.0
+_CREATED_SESSION_POLL_INTERVAL_SECONDS = 0.5
+
+# The terminal-derived identity Herdr publishes for a recognized agent
+# whose session has not been reported yet. It rotates to the session
+# identity the moment the agent publishes, so it must never become a
+# topic target or an adoption candidate (TASK-46).
+_TERMINAL_FALLBACK_KIND = "terminal"
 
 # Agent TUIs (Claude Code, Codex, Pi) read a submit key that arrives in the
 # same input batch as the prompt text as a literal newline, so the prompt is
@@ -295,11 +309,15 @@ def _parse_live_record(record: Mapping[str, object]) -> HerdrLiveRecord | None:
         terminal_id = locators["terminal_id"]
         if agent not in {"claude", "codex", "gemini"} or terminal_id is None:
             return None
-        # Providers that may remain sessionless still expose a unique terminal
-        # identity. Pi is excluded: Herdr publishes its durable session shortly
+        # The terminal identity is a BOOT-GAP identity only: a pane that
+        # never publishes a session never becomes a topic target (creation
+        # requires the session-backed record; see _await_created_session_target).
+        # Pi is excluded entirely: Herdr publishes its durable session shortly
         # after startup, and creating a terminal topic in that gap would create
         # a second topic when the durable identity arrives.
-        composite = HerdrSessionComposite("herdr", agent, "terminal", terminal_id)
+        composite = HerdrSessionComposite(
+            "herdr", agent, _TERMINAL_FALLBACK_KIND, terminal_id
+        )
     target_id = herdr_session_target_id(composite)
     # ``cwd`` is the agent's own working directory; ``foreground_cwd`` follows
     # whatever the agent currently shells into (a worktree, a plugin cache) and
@@ -716,7 +734,10 @@ class HerdrManager:
         place that decides what counts: it emits a record only for a live agent
         carrying a guarded target, and a bare shell pane never reaches it. The
         verdict travels on the window so discovery needs no herdr-shaped check
-        of its own.
+        of its own. A terminal-fallback record is ineligible: adopting it
+        would mint a topic on a digest that rotates the moment the agent
+        publishes its session (TASK-46); the topic-mapping contract already
+        says a sessionless detected agent does not become a topic.
         """
         return WindowRef(
             window_id=record.target_id,
@@ -725,6 +746,7 @@ class HerdrManager:
             pane_current_command=record.composite.agent,
             topic_eligible=adoptable
             and is_herdr_session_target(record.target_id)
+            and record.composite.kind != _TERMINAL_FALLBACK_KIND
             and bool(record.composite.agent.strip()),
         )
 
@@ -1324,17 +1346,52 @@ class HerdrManager:
         pane_id: str,
         workspace_id: str | None,
     ) -> HerdrLiveRecord:
-        """Wait for exactly one session reported for a newly-created pane."""
+        """Wait for the pane's stable, session-backed identity.
+
+        Only a complete session composite counts. A terminal-fallback
+        record (the pane's claude has started but not yet published its
+        session) is deliberately skipped: its derived target rotates the
+        moment the real session appears, and a target minted from it
+        goes stale during hook registration, which reads as "session
+        did not register and is gone" while the pane boots on
+        (2026-09-29 incident, TASK-46).
+        """
         loop = asyncio.get_running_loop()
         deadline = loop.time() + _CREATED_SESSION_DISCOVERY_TIMEOUT_SECONDS
+        # The first poll pins the pane by the locators the creation
+        # transaction owns; every later poll follows the TERMINAL identity
+        # instead. Herdr renumbers pane and tab ids on structural changes
+        # (compaction), so a slow boot whose pane moves mid-wait would never
+        # re-match on locators and the transaction would roll back a healthy
+        # pane (the TASK-46 failure shape through a different door). The
+        # terminal id is the one locator that survives renumbering.
+        terminal_id: str | None = None
         while True:
-            matches = [
-                record
-                for record in await self._agent_list_snapshot()
-                if record.tab_id == tab_id
-                and record.pane_id == pane_id
-                and (workspace_id is None or record.workspace_id == workspace_id)
-            ]
+            records = await self._agent_list_snapshot()
+            if terminal_id is None:
+                pinned = [
+                    record
+                    for record in records
+                    if record.tab_id == tab_id
+                    and record.pane_id == pane_id
+                    and (
+                        workspace_id is None or record.workspace_id == workspace_id
+                    )
+                ]
+                if len(pinned) == 1:
+                    terminal_id = pinned[0].terminal_id
+                elif len(pinned) > 1:
+                    raise HerdrAmbiguousTargetError(
+                        "new Herdr pane reported duplicate sessions"
+                    )
+            matches: list[HerdrLiveRecord] = []
+            if terminal_id is not None:
+                matches = [
+                    record
+                    for record in records
+                    if record.terminal_id == terminal_id
+                    and record.composite.kind != _TERMINAL_FALLBACK_KIND
+                ]
             if len(matches) == 1:
                 return matches[0]
             if len(matches) > 1:

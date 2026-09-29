@@ -58,7 +58,7 @@ def expired_discovery_window(monkeypatch: pytest.MonkeyPatch) -> None:
 
     The loop always polls once before checking the deadline, so the tests that
     assert post-deadline behaviour keep their meaning without waiting out the
-    real 5s window.
+    real 20s window.
     """
     monkeypatch.setattr(herdr_module, "_CREATED_SESSION_DISCOVERY_TIMEOUT_SECONDS", 0.0)
 
@@ -127,12 +127,18 @@ class _SnapshotSequence:
         return await self._fakes[min(self._index, len(self._fakes) - 1)](args)
 
 
-def _sessionless(terminal_id: str = "term-a") -> dict[str, object]:
+def _sessionless(
+    terminal_id: str = "term-a",
+    *,
+    pane_id: str = "w2:p1",
+    tab_id: str = "w2:t1",
+    workspace_id: str = "w2",
+) -> dict[str, object]:
     return {
         "terminal_id": terminal_id,
-        "pane_id": "w2:p1",
-        "tab_id": "w2:t1",
-        "workspace_id": "w2",
+        "pane_id": pane_id,
+        "tab_id": tab_id,
+        "workspace_id": workspace_id,
         "agent": "claude",
     }
 
@@ -242,11 +248,20 @@ async def test_sessionless_snapshot_uses_terminal_fallback() -> None:
     }
     once_published = _agent(value="session-a")
 
-    fallback_window = (await _manager(_live_fake(at_hook_time)).list_windows())[0]
+    # Routability, not the adoption picker: a terminal-fallback record is
+    # addressable but ineligible (its id rotates when the session lands,
+    # TASK-46), so list_windows hides it while find_window_by_id keeps it.
+    fallback_window = await _manager(_live_fake(at_hook_time)).find_window_by_id(
+        _sessionless_target("term-a")
+    )
     live_window = (await _manager(_live_fake(once_published)).list_windows())[0]
 
+    assert fallback_window is not None
     assert fallback_window.window_id == _sessionless_target("term-a")
+    assert fallback_window.topic_eligible is False
+    assert await _manager(_live_fake(at_hook_time)).list_windows() == []
     assert live_window.window_id == _target("session-a")
+    assert live_window.topic_eligible is True
     assert fallback_window.alias_window_ids == ()
     assert live_window.alias_window_ids == ()
 
@@ -350,9 +365,16 @@ async def test_sessionless_agent_is_preserved_by_pane_compaction() -> None:
     }
     after = {**before, "pane_id": "w1:p2", "tab_id": "w1:t3", "workspace_id": "w1"}
 
-    before_window = (await _manager(_live_fake(before)).list_windows())[0]
-    after_window = (await _manager(_live_fake(after)).list_windows())[0]
+    # The fallback identity survives the pane move (observed through
+    # routability; it is ineligible for adoption, see TASK-46).
+    before_window = await _manager(_live_fake(before)).find_window_by_id(
+        _sessionless_target("term-b")
+    )
+    after_window = await _manager(_live_fake(after)).find_window_by_id(
+        _sessionless_target("term-b")
+    )
 
+    assert before_window is not None and after_window is not None
     assert before_window.window_id == _sessionless_target("term-b")
     assert after_window.window_id == _sessionless_target("term-b")
 
@@ -1091,6 +1113,147 @@ async def test_created_session_discovery_waits_for_delayed_pi_report(
     )
     assert target.target_id == _target()
     assert calls == 29
+
+
+async def test_created_session_discovery_skips_terminal_fallback(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A pre-session terminal fallback must not become the topic target.
+
+    The fallback's derived id rotates the moment the real session is
+    published (TASK-46, 2026-09-29 incident): a target minted from it
+    goes stale during hook registration and the launch then reads as
+    "session did not register and is gone" while the pane keeps booting.
+    """
+    calls = 0
+
+    async def no_sleep(_: float) -> None:
+        return None
+
+    monkeypatch.setattr(asyncio, "sleep", no_sleep)
+
+    class FallbackFirstRunner(FakeHerdr):
+        async def __call__(self, args: Sequence[str]) -> tuple[int, str, str]:
+            nonlocal calls
+            if args == ["agent", "list"]:
+                calls += 1
+                if calls == 1:
+                    return 0, _agents(_sessionless(pane_id="w9:p1", tab_id="w9:t1", workspace_id="selected")), ""
+                return (
+                    0,
+                    _agents(_agent(pane_id="w9:p1", tab_id="w9:t1", workspace_id="selected")),
+                    "",
+                )
+            return await super().__call__(args)
+
+    fake = (
+        FallbackFirstRunner()
+        .on("workspace", "list", out=_workspace("selected", tmp_path))
+        .on("tab", "create", out=_created())
+        .on("tab", "list", out=_tabs())
+    )
+    target = await _manager(fake).create_topic_target(
+        str(tmp_path), launch_command=None, workspace_id="selected"
+    )
+    assert target.target_id == _target()
+    assert calls == 2
+
+
+async def test_created_session_discovery_survives_pane_renumbering(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A pane move during boot must not lose the launching pane.
+
+    Herdr renumbers pane and tab ids on structural changes; the discovery
+    poll follows the TERMINAL identity after the first poll pins it, so a
+    compaction mid-boot cannot make creation roll back a healthy pane
+    (code-review finding on TASK-46).
+    """
+    calls = 0
+
+    async def no_sleep(_: float) -> None:
+        return None
+
+    monkeypatch.setattr(asyncio, "sleep", no_sleep)
+
+    class MovedRunner(FakeHerdr):
+        async def __call__(self, args: Sequence[str]) -> tuple[int, str, str]:
+            nonlocal calls
+            if args == ["agent", "list"]:
+                calls += 1
+                if calls == 1:
+                    return (
+                        0,
+                        _agents(
+                            _sessionless(
+                                pane_id="w9:p1",
+                                tab_id="w9:t1",
+                                workspace_id="selected",
+                            )
+                        ),
+                        "",
+                    )
+                return (
+                    0,
+                    _agents(
+                        _agent(
+                            pane_id="w1:p2",
+                            tab_id="w1:t3",
+                            workspace_id="selected",
+                            terminal_id="term-a",
+                            value="session-a",
+                        )
+                    ),
+                    "",
+                )
+            return await super().__call__(args)
+
+    fake = (
+        MovedRunner()
+        .on("workspace", "list", out=_workspace("selected", tmp_path))
+        .on("tab", "create", out=_created())
+        .on("tab", "list", out=_tabs(tab_id="w1:t3"))
+    )
+    target = await _manager(fake).create_topic_target(
+        str(tmp_path), launch_command=None, workspace_id="selected"
+    )
+    assert target.target_id == _target("session-a")
+    assert calls == 2
+
+
+async def test_created_session_discovery_rejects_persistent_fallback(
+    tmp_path: Path,
+    expired_discovery_window: None,
+) -> None:
+    """A pane that never publishes a session fails creation and rolls back.
+
+    The terminal fallback alone is not an addressee: accepting it (the
+    pre-TASK-46 behavior) committed a topic whose target id rotates away
+    as soon as a session appears, or never resolves at all.
+    """
+    fake = (
+        FakeHerdr()
+        .on("workspace", "create", out=_result(workspace={"workspace_id": "owned"}))
+        .on("tab", "create", out=_created())
+        .on("pane", "run", out=_result(type="ok"))
+        .on(
+            "agent",
+            "list",
+            out=_agents(
+                _sessionless(pane_id="w9:p1", tab_id="w9:t1", workspace_id="owned")
+            ),
+        )
+        .on("tab", "close", out=_result(type="ok"))
+        .on("workspace", "close", out=_result(type="ok"))
+    )
+    with pytest.raises(HerdrUnresolvedTargetError):
+        await _manager(fake).create_topic_target(
+            str(tmp_path), launch_command="claude", workspace_id=None
+        )
+    assert fake.calls[-2:] == [
+        ["tab", "close", "w9:t1"],
+        ["workspace", "close", "owned"],
+    ]
 
 
 async def test_create_topic_target_without_selection_creates_workspace_at_cwd(
