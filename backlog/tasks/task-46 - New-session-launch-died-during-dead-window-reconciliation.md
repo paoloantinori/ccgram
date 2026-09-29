@@ -116,10 +116,11 @@ would now fail creation after 20s instead of binding via the fallback.
 - herdr upstream: fallback->sessionful digest rotation should carry
   the previous digest as an alias (the c1e2aeef-style transitions
   already do); would make the whole class structurally impossible.
-  Not filed with them yet (needs maintainer approval for external
-  communication).
-- The orphaned wN workspace pane: surfaced to the maintainer; adopt
-  or close by hand (it holds ~2h of session work).
+  FILED 2026-09-29 with maintainer approval: herdrdev/herdr#4757
+  (labelled bug; unslop'd, audit declared).
+- The orphaned wN workspace pane: CLOSED 2026-09-29 with maintainer
+  approval (its session's work continues in the 09:48-resumed pane;
+  the transcript holds the history).
 
 ## Definition of done
 
