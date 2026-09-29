@@ -1374,9 +1374,7 @@ class HerdrManager:
                     for record in records
                     if record.tab_id == tab_id
                     and record.pane_id == pane_id
-                    and (
-                        workspace_id is None or record.workspace_id == workspace_id
-                    )
+                    and (workspace_id is None or record.workspace_id == workspace_id)
                 ]
                 if len(pinned) == 1:
                     terminal_id = pinned[0].terminal_id

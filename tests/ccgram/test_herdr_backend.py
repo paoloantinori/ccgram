@@ -1138,10 +1138,20 @@ async def test_created_session_discovery_skips_terminal_fallback(
             if args == ["agent", "list"]:
                 calls += 1
                 if calls == 1:
-                    return 0, _agents(_sessionless(pane_id="w9:p1", tab_id="w9:t1", workspace_id="selected")), ""
+                    return (
+                        0,
+                        _agents(
+                            _sessionless(
+                                pane_id="w9:p1", tab_id="w9:t1", workspace_id="selected"
+                            )
+                        ),
+                        "",
+                    )
                 return (
                     0,
-                    _agents(_agent(pane_id="w9:p1", tab_id="w9:t1", workspace_id="selected")),
+                    _agents(
+                        _agent(pane_id="w9:p1", tab_id="w9:t1", workspace_id="selected")
+                    ),
                     "",
                 )
             return await super().__call__(args)
