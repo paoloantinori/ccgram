@@ -38,3 +38,18 @@ def clear(window_id: str) -> None:
 def reset() -> None:
     """Clear the whole cache (consumer shutdown; test isolation)."""
     _cache.clear()
+
+
+def agent_working(window_id: str) -> bool:
+    """Whether the window's agent is actively working right now.
+
+    The interactive-UI scrapers use this to skip prompt detection while
+    the agent runs: a working agent cannot be asking a selection (a real
+    prompt pauses the turn), and Claude Code's queued-input block (the
+    rendering of messages typed mid-turn) is exactly the
+    selection-shaped region a working pane shows (TASK-47). Unknown or
+    missing status (tmux, cold cache) reports False so callers keep
+    their existing scraping behavior.
+    """
+    status = _cache.get(window_id)
+    return status is not None and status.state == "working"

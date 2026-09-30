@@ -85,6 +85,48 @@ Regression tests: the two repro cases above must parse as None; the
 existing /remote-control and compact-selection fixtures must keep
 matching.
 
+## Fix (2026-09-30)
+
+Implemented after the artifact and two review rounds:
+agent_status_cache gains agent_working(window_id); interactive
+interpretation is suppressed at observe._resolve_status (covers BOTH
+the strategy parse and the provider parse, which the first cut missed)
+while the agent WORKS, falling through to the native working status;
+pane_has_interactive_prompt returns False for a working agent, which
+breaks the dismissal-confirmation loop that rejected every text retry.
+Deliberately NOT gated (review findings): _capture_interactive_content
+(the funnel for hook-authoritative dispatch; a scraped-status veto
+must not suppress hook ground truth, and a stale working entry during
+a push-stream drop would hide real prompts), and the non-active pane
+scan (window-level status cannot speak for a sibling pane in
+multi-pane windows; that hole needs per-pane status and stays open
+upstream of this fix). Unknown status keeps scraping, so tmux and
+cold-cache moments are unchanged; Claude's real AskUserQuestion and
+ExitPlanMode arrive through the transcript tool_use path, not the
+scraper. The catch-all's cursor anchor now requires content after the
+glyph (the pyte-padded idle input box can no longer anchor). Gates:
+seam-level gate tests red-green verified against the patched-out
+helper; pyright clean on the changed files.
+
+## Follow-on incident (same day)
+
+The false latch did not just show buttons: text messages to the topic
+were REJECTED in a loop (dismissal confirmation re-ran the same broken
+detector). The confirmation gate above fixes that; the rejection
+itself is by design once a REAL prompt holds.
+
+## Follow-ups (2026-09-30 altitude review)
+
+- The gates read herdr's push-cache status; on tmux (upstream default)
+  agent_working is constant False and the class stays live. The
+  backend-independent discriminator is co-presence of an active spinner
+  line on the same screen (parse_status_block already extracts it);
+  design it before contributing this fix upstream.
+- Gate placement per review: suppression lives at observe._resolve_status
+  (covers strategy AND provider scrapers) plus the non-active pane scan;
+  the capture helper under the hook path is deliberately NOT gated (a
+  scraped-status veto must not suppress hook-authoritative dispatch).
+
 ## Definition of done
 
 Repro as unit tests (red on current code), fix green, no regression in

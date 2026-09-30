@@ -47,6 +47,31 @@ _active_drafts: dict[tuple[int, str, int | None, int], DraftStream] = {}
 _draft_expiry_tasks: dict[tuple[int, str, int | None, int], asyncio.Task[None]] = {}
 
 
+def _handle_unroutable_message(msg: NewMessage) -> None:
+    """Warn about a complete message that found no routed topic.
+
+    The window-session link can lag reality right after a restart or an
+    adoption (2026-09-29 antiwire incident: complete messages dropped
+    silently with only a DEBUG line because find_users_for_session
+    returned empty for a bound, tracked session). The warning makes the
+    class visible; durable recovery belongs to the delivery contract
+    (receipt.fail plus restart replay, the TASK-48 follow-up) rather
+    than an in-memory retry, which would violate the per-user
+    receive-order contract and lose to any restart inside its window.
+    """
+    deliverable = (
+        msg.is_complete and msg.role == "assistant" and msg.content_type == "text"
+    )
+    if not deliverable:
+        logger.debug("No active users for session %s", msg.session_id)
+        return
+    logger.warning(
+        "Complete assistant message has no routed topic; dropped",
+        session_id=msg.session_id,
+        text_len=len(msg.text),
+    )
+
+
 async def _update_window_offset(user_id: int, window_id: str) -> None:
     """Advance transcript offset after a complete message is handled."""
     session = await session_query.resolve_session_for_window(window_id)
@@ -155,7 +180,10 @@ async def enqueue_backlog_skip_notice(client: TelegramClient, intent: object) ->
         raise RuntimeError("backlog skip notice could not enter the delivery queue")
 
 
-async def handle_new_message(msg: NewMessage, client: TelegramClient) -> None:  # noqa: C901, PLR0912
+async def handle_new_message(  # noqa: C901, PLR0912
+    msg: NewMessage,
+    client: TelegramClient,
+) -> None:
     """Handle a new assistant message — enqueue for sequential processing.
 
     Messages are queued per-user to ensure status messages always appear last.
@@ -172,7 +200,7 @@ async def handle_new_message(msg: NewMessage, client: TelegramClient) -> None:  
     active_users = session_query.find_users_for_session(msg.session_id)
 
     if not active_users:
-        logger.debug("No active users for session %s", msg.session_id)
+        _handle_unroutable_message(msg)
         return
 
     for user_id, window_id, thread_id, chat_id in active_users:

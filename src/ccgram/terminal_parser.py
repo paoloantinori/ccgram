@@ -127,7 +127,10 @@ UI_PATTERNS: list[UIPattern] = [
     # cursor.  min_gap=1 for compact prompts.
     UIPattern(
         name="SelectionUI",
-        top=(re.compile(r"^\s*[❯›]\s"),),
+        # Content after the glyph: a real selection cursor renders its
+        # option text beside the glyph; the idle input box (pyte-padded
+        # to full width) must not anchor (TASK-47).
+        top=(re.compile(r"^\s*[❯›]\s+\S"),),
         bottom=(
             re.compile(r"^\s*Esc to (cancel|exit)"),
             re.compile(r"^\s*Enter to (select|confirm|continue)"),

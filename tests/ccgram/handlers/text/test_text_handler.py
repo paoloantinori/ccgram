@@ -1132,3 +1132,35 @@ class TestDismissalFailurePaths:
         await _forward_message("@0", 100, 42, "hello", AsyncMock(), message)
 
         assert _mock_send.await_count == 0, "no forward while the active pane prompts"
+
+
+class TestWorkingAgentPromptGate:
+    async def test_working_agent_has_no_prompt_without_capture(self, monkeypatch):
+        """A working agent cannot be asked a selection; the queued-input
+        block the scraper would read must not block text forwarding
+        (TASK-47: the dismissal confirmation loop rejected every retry).
+        """
+        from ccgram.handlers.interactive import interactive_ui as iui
+        from ccgram.multiplexer import agent_status_cache
+        from ccgram.multiplexer.base import AgentStatus
+
+        async def explode(**kwargs):  # pragma: no cover - must not run
+            raise AssertionError("capture must not run for a working agent")
+
+        monkeypatch.setattr(
+            iui,
+            "tmux_manager",
+            SimpleNamespace(
+                capture_pane_by_id=explode,
+                capture_pane=explode,
+                find_window_by_id=explode,
+            ),
+        )
+        agent_status_cache.reset()
+        agent_status_cache.set_status(
+            "w-gate", AgentStatus(state="working")
+        )
+        try:
+            assert await iui.pane_has_interactive_prompt("w-gate") is False
+        finally:
+            agent_status_cache.reset()

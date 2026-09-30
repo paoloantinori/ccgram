@@ -359,6 +359,19 @@ class TestInteractiveUIStrategy:
     def test_clear_pane_alerts_empty_is_noop(self):
         self.strategy.clear_pane_alerts("@0")
 
+    def test_unknown_status_still_detects_selection(self):
+        from ccgram.multiplexer import agent_status_cache
+
+        pane = (
+            "  Pick a thing:\n"
+            "  ❯ Alpha\n"
+            "    Beta\n"
+            "  Enter to confirm\n"
+        )
+        agent_status_cache.reset()
+        result = self.screen_buffer.parse_with_pyte("w2", pane, 100, 40)
+        assert result is not None and result.is_interactive
+
 
 class TestTopicLifecycleStrategy:
     def setup_method(self):
@@ -485,3 +498,4 @@ class TestTopicLifecycleStrategy:
         ws = self.poll_state.get_state("@0")
         ws.probe_failures = MAX_PROBE_FAILURES - 1
         assert not self.strategy.should_skip_probe("@0")
+
