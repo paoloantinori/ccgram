@@ -1,7 +1,7 @@
 ---
 id: TASK-48
 title: Complete assistant messages dropped silently when routing finds no topic (antiwire incident)
-status: In Progress
+status: Done
 assignee: []
 created_date: '2026-09-30 07:55'
 updated_date: '2026-09-30 07:55'
@@ -64,3 +64,11 @@ below. The class is never silent again.
 Fix with tests (complete unroutable message warns and enqueues
 nothing; non-deliverable content unchanged), gates, deploy both
 bridges.
+
+
+## Closure (2026-09-30)
+
+Both review gates ran with all findings landed; serial battery 7602
+green; deployed and verified on bird (4.11.3.dev97+dev, started
+10:49:30, zero journal errors) and Mac (4.11.3.dev97+dev, clean
+startup). Pushed as 56e5d451.

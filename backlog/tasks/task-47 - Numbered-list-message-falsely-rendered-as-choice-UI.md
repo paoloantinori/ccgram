@@ -1,7 +1,7 @@
 ---
 id: TASK-47
 title: Numbered-list message falsely rendered as choice UI (selection scraper false positive)
-status: Open
+status: Done
 assignee: []
 created_date: '2026-09-29 19:15'
 updated_date: '2026-09-29 19:15'
@@ -131,3 +131,11 @@ itself is by design once a REAL prompt holds.
 
 Repro as unit tests (red on current code), fix green, no regression in
 the selection-detection suite, gates, deploy both bridges.
+
+
+## Closure (2026-09-30)
+
+Both review gates ran with all findings landed; serial battery 7602
+green; deployed and verified on bird (4.11.3.dev97+dev, started
+10:49:30, zero journal errors) and Mac (4.11.3.dev97+dev, clean
+startup). Pushed as 56e5d451.
