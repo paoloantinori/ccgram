@@ -31,7 +31,7 @@ from ...telegram_client import TelegramClient
 from ...window_query import get_window_provider
 from ...thread_router import thread_router
 from ...multiplexer import multiplexer as tmux_manager
-from ...multiplexer.agent_status_cache import agent_working
+from ...multiplexer.agent_status_cache import resolve_agent_working
 from ...topic_state_registry import topic_state
 from ..callback_data import (
     CB_ASK_CHOICE,
@@ -607,7 +607,7 @@ async def pane_has_interactive_prompt(
     gone" (a modal may still be open and would eat the forwarded text
     as an answer).
     """
-    if agent_working(window_id):
+    if await resolve_agent_working(window_id):
         # TASK-47: never confirm against a working pane; Claude Code's
         # queued-input block reads as a prompt to the scraper, the
         # Escape would never confirm, and every text retry gets
