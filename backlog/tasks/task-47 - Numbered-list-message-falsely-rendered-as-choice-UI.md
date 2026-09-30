@@ -139,3 +139,19 @@ Both review gates ran with all findings landed; serial battery 7602
 green; deployed and verified on bird (4.11.3.dev97+dev, started
 10:49:30, zero journal errors) and Mac (4.11.3.dev97+dev, clean
 startup). Pushed as 56e5d451.
+
+## Post-closure hardening (2026-09-30 afternoon)
+
+A live report ("buttons still shown on local_ai, Mac") was first read
+as a gate failure; forensics showed it was a TRUE POSITIVE (a real
+Claude Code policy notice requiring a keypress, correctly surfaced as
+buttons). The investigation that misread it still found two real gaps
+in the gate, closed as f9356bc9 (deployed dev99 both bridges):
+agent_status_cache now owns ONE freshness policy (TTL-stamped push
+entries; one backend probe on cold/stale with ordering-guarded
+write-back; None negatively cached 15s; probe failures logged), the
+observe busy/blocked synthesis consumes the same primitive instead of a
+second drifted cold-cache path, and the raw non-TTL get_status read is
+deleted. Both directions of the gate are now reliable: real prompts
+survive a stale "working", and queued input cannot resurrect a false
+prompt from a cold cache.
