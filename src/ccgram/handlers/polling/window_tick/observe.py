@@ -92,18 +92,14 @@ async def _resolve_status(
         parse_claude_chrome=provider.capabilities.uses_pyte_status_parsing,
         runtime=runtime,
     )
-    if status is not None and not (
-        status.is_interactive and agent_working(window_id)
-    ):
+    if status is not None and not (status.is_interactive and agent_working(window_id)):
         return status
     clean_text = sb.get_rendered_text(window_id, pane_text)
     pane_title = ""
     if provider.capabilities.uses_pane_title:
         pane_title = await tmux_manager.get_pane_title(w.window_id)
     status = provider.parse_terminal_status(clean_text, pane_title=pane_title)
-    if status is not None and not (
-        status.is_interactive and agent_working(window_id)
-    ):
+    if status is not None and not (status.is_interactive and agent_working(window_id)):
         # TASK-47: a selection-shaped region on a WORKING pane is Claude
         # Code's queued-input block (messages typed mid-turn), not a
         # prompt; fall through to the native working status instead of

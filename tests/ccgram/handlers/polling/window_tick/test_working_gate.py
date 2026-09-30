@@ -53,9 +53,7 @@ async def test_working_status_suppresses_strategy_interactive() -> None:
     with (
         patch.object(observe, "_parse_with_pyte", return_value=_INTERACTIVE),
         patch.object(observe, "_get_provider", return_value=_provider(None)),
-        patch.object(
-            observe, "_native_agent_status", AsyncMock(return_value=native)
-        ),
+        patch.object(observe, "_native_agent_status", AsyncMock(return_value=native)),
     ):
         result = await _resolve_status("w1", "pane", _WINDOW)
     assert result is not None and not result.is_interactive

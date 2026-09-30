@@ -112,9 +112,7 @@ def mock_deps():
         }
 
 
-async def test_unroutable_complete_message_drops_without_enqueue(
-    bot, mock_deps
-):
+async def test_unroutable_complete_message_drops_without_enqueue(bot, mock_deps):
     """A complete unroutable message warns and enqueues nothing (antiwire)."""
     mock_deps["sq"].find_users_for_session.return_value = []
     await handle_new_message(_make_msg(), bot)

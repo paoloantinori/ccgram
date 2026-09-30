@@ -1157,9 +1157,7 @@ class TestWorkingAgentPromptGate:
             ),
         )
         agent_status_cache.reset()
-        agent_status_cache.set_status(
-            "w-gate", AgentStatus(state="working")
-        )
+        agent_status_cache.set_status("w-gate", AgentStatus(state="working"))
         try:
             assert await iui.pane_has_interactive_prompt("w-gate") is False
         finally:
