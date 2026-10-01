@@ -155,3 +155,17 @@ second drifted cold-cache path, and the raw non-TTL get_status read is
 deleted. Both directions of the gate are now reliable: real prompts
 survive a stale "working", and queued input cannot resurrect a false
 prompt from a cold cache.
+
+## Third false-positive source (2026-10-01, live)
+
+A Mac topic (anti-vocale) rejected all text via the dismissal loop
+again; the trigger this time was a USER-MESSAGE ECHO in scrollback
+(Claude Code renders user turns with the same glyph as a selection
+cursor) sitting above the agent's numbered reply, with the agent IDLE
+(the working-agent gate correctly did not apply). Fix (094785b2,
+deployed dev104 both bridges): the catch-all's numbered-item bottom now
+only counts within 12 lines of the pane's last non-empty line when
+there is no action-hint footer (scrollback_guard). Real selections sit
+atop their footer; echoes sit mid-history. Verified on the live pane
+capture (now None) plus three regressions. Immediate unblock was a
+Mac bridge restart (the latch is in-memory).
