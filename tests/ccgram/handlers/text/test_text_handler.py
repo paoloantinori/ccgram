@@ -1165,9 +1165,7 @@ class TestWorkingAgentPromptGate:
 
 
 class TestAdvisoryCatchAll:
-    async def test_selection_ui_send_does_not_latch_blocking_mode(
-        self, monkeypatch
-    ):
+    async def test_selection_ui_send_does_not_latch_blocking_mode(self, monkeypatch):
         """The catch-all keyboard is advisory: no blocking latch, so a
         false SelectionUI match can never reject the user's text
         (TASK-47's recurring incident class)."""
@@ -1186,9 +1184,7 @@ class TestAdvisoryCatchAll:
             return sent
 
         monkeypatch.setattr(iui, "_capture_interactive_content", capture)
-        monkeypatch.setattr(
-            iui, "_send_interactive_with_retry", send_with_retry
-        )
+        monkeypatch.setattr(iui, "_send_interactive_with_retry", send_with_retry)
         monkeypatch.setattr(
             iui.thread_router,
             "resolve_chat_id",
@@ -1217,9 +1213,7 @@ class TestAdvisoryCatchAll:
             return sent
 
         monkeypatch.setattr(iui, "_capture_interactive_content", capture)
-        monkeypatch.setattr(
-            iui, "_send_interactive_with_retry", send_with_retry
-        )
+        monkeypatch.setattr(iui, "_send_interactive_with_retry", send_with_retry)
         monkeypatch.setattr(
             iui.thread_router,
             "resolve_chat_id",
@@ -1230,7 +1224,5 @@ class TestAdvisoryCatchAll:
             SimpleNamespace(), 7, "@1", 43, chat_id=-100200
         )
         assert ok is True
-        assert (
-            get_interactive_window(7, 43, chat_id=-100200) == "@1"
-        )
+        assert get_interactive_window(7, 43, chat_id=-100200) == "@1"
         clear_interactive_mode(7, 43, chat_id=-100200)
