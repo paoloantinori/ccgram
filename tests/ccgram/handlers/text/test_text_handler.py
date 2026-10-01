@@ -1162,3 +1162,75 @@ class TestWorkingAgentPromptGate:
             assert await iui.pane_has_interactive_prompt("w-gate") is False
         finally:
             agent_status_cache.reset()
+
+
+class TestAdvisoryCatchAll:
+    async def test_selection_ui_send_does_not_latch_blocking_mode(
+        self, monkeypatch
+    ):
+        """The catch-all keyboard is advisory: no blocking latch, so a
+        false SelectionUI match can never reject the user's text
+        (TASK-47's recurring incident class)."""
+        from ccgram.handlers.interactive import (
+            clear_interactive_mode,
+            get_interactive_window,
+        )
+        from ccgram.handlers.interactive import interactive_ui as iui
+
+        async def capture(window_id, pane_id=None):
+            return ("SelectionUI", "❯ Option A\n  1. one")
+
+        sent = SimpleNamespace(message_id=77)
+
+        async def send_with_retry(*args, **kwargs):
+            return sent
+
+        monkeypatch.setattr(iui, "_capture_interactive_content", capture)
+        monkeypatch.setattr(
+            iui, "_send_interactive_with_retry", send_with_retry
+        )
+        monkeypatch.setattr(
+            iui.thread_router,
+            "resolve_chat_id",
+            lambda *a, **k: -100200,
+        )
+        clear_interactive_mode(7, 42, chat_id=-100200)
+        ok = await iui.handle_interactive_ui(
+            SimpleNamespace(), 7, "@1", 42, chat_id=-100200
+        )
+        assert ok is True
+        assert get_interactive_window(7, 42, chat_id=-100200) is None
+
+    async def test_named_ui_send_latches_blocking_mode(self, monkeypatch):
+        from ccgram.handlers.interactive import (
+            clear_interactive_mode,
+            get_interactive_window,
+        )
+        from ccgram.handlers.interactive import interactive_ui as iui
+
+        async def capture(window_id, pane_id=None):
+            return ("AskUserQuestion", "Which option?")
+
+        sent = SimpleNamespace(message_id=78)
+
+        async def send_with_retry(*args, **kwargs):
+            return sent
+
+        monkeypatch.setattr(iui, "_capture_interactive_content", capture)
+        monkeypatch.setattr(
+            iui, "_send_interactive_with_retry", send_with_retry
+        )
+        monkeypatch.setattr(
+            iui.thread_router,
+            "resolve_chat_id",
+            lambda *a, **k: -100200,
+        )
+        clear_interactive_mode(7, 43, chat_id=-100200)
+        ok = await iui.handle_interactive_ui(
+            SimpleNamespace(), 7, "@1", 43, chat_id=-100200
+        )
+        assert ok is True
+        assert (
+            get_interactive_window(7, 43, chat_id=-100200) == "@1"
+        )
+        clear_interactive_mode(7, 43, chat_id=-100200)

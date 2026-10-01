@@ -455,8 +455,8 @@ async def _edit_interactive_msg(
     msg_id: int,
     text: str,
     keyboard: InlineKeyboardMarkup,
-    ikey: InteractiveKey,
-    window_id: str,
+    ikey: InteractiveKey,  # noqa: ARG001  # mode latching moved to callers
+    window_id: str,  # noqa: ARG001  # mode latching moved to callers
 ) -> bool | None:
     """Try to edit an existing interactive message.
 
@@ -470,7 +470,6 @@ async def _edit_interactive_msg(
             reply_markup=keyboard,
             link_preview_options=NO_LINK_PREVIEW,
         )
-        _interactive_mode[ikey] = window_id
         return True
     except BadRequest as e:
         if "Message is not modified" in e.message:
@@ -674,6 +673,14 @@ async def handle_interactive_ui(
         sequence=sequence,
     )
 
+    # The structural catch-all is advisory: unknown selection-shaped
+    # panes get the keyboard, but only a NAMED UI pattern or a
+    # transcript tool_use may latch the blocking interactive mode.
+    # Catch-all matches have produced three false-latch incidents
+    # (queued input, scrollback echoes; TASK-47), each of which
+    # rejected the user's text through the dismissal loop.
+    blocking = ui_name != "SelectionUI"
+
     # Try editing existing interactive message first
     existing_msg_id = _interactive_msgs.get(ikey)
     if existing_msg_id:
@@ -683,6 +690,8 @@ async def handle_interactive_ui(
         if edited:
             _interactive_contexts[ikey] = (resolved_chat_id, existing_msg_id)
             _interactive_panes[ikey] = pane_id
+            if blocking:
+                _interactive_mode[ikey] = window_id
         return edited or False
 
     # Cooldown: prevent rapid retries when sends fail
@@ -717,7 +726,8 @@ async def handle_interactive_ui(
         _interactive_msgs[ikey] = sent.message_id
         _interactive_panes[ikey] = pane_id
         _interactive_contexts[ikey] = (resolved_chat_id, sent.message_id)
-        _interactive_mode[ikey] = window_id
+        if blocking:
+            _interactive_mode[ikey] = window_id
         _send_cooldowns.pop(ikey, None)
     return sent is not None
 
