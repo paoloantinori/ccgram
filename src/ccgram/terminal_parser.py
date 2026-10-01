@@ -58,6 +58,12 @@ class UIPattern:
     min_gap: int = 2  # minimum lines between top and bottom (inclusive)
     context_above: int = 0  # extra lines above top marker to include in content
     anchor_last: bool = False  # start at the last top match, not the first
+    # When True, a numbered-item bottom (no action-hint footer) only
+    # counts near the pane bottom: a real selection cursor sits right
+    # above its footer, while transcript echoes (user messages render
+    # with the same glyph) sit mid-scrollback above unrelated numbered
+    # lists (TASK-47 scrollback incident, 2026-10-01).
+    scrollback_guard: bool = False
 
 
 # ── UI pattern definitions (order matters — first match wins) ────────────
@@ -143,6 +149,7 @@ UI_PATTERNS: list[UIPattern] = [
         min_gap=1,
         context_above=10,
         anchor_last=True,
+        scrollback_guard=True,
     ),
 ]
 
@@ -186,6 +193,26 @@ def _context_start(lines: list[str], top_idx: int, context_above: int) -> int:
     return top_idx
 
 
+def _last_nonempty_from(lines: list[str], top_idx: int) -> int | None:
+    """The last non-empty line after *top_idx* (open-bottom boundary)."""
+    for i in range(len(lines) - 1, top_idx, -1):
+        if lines[i].strip():
+            return i
+    return None
+
+
+def _rejects_scrollback_footer(lines: list[str], bottom_idx: int) -> bool:
+    """A numbered-item bottom with no action-hint footer, far from the
+    pane's last non-empty line, is scrollback (a user-message echo above
+    an unrelated numbered list), not a live selection footer."""
+    if _ACTION_HINT_RE.search(lines[bottom_idx]):
+        return False
+    last_nonempty = len(lines) - 1
+    while last_nonempty > bottom_idx and not lines[last_nonempty].strip():
+        last_nonempty -= 1
+    return last_nonempty - bottom_idx > _SCROLLBACK_GUARD_DISTANCE
+
+
 def _try_extract(lines: list[str], pattern: UIPattern) -> InteractiveUIContent | None:
     """Try to extract content matching a single UI pattern.
 
@@ -223,14 +250,15 @@ def _try_extract(lines: list[str], pattern: UIPattern) -> InteractiveUIContent |
     if top_idx is None:
         return None
 
-    # No bottom patterns → use last non-empty line as boundary
     if not pattern.bottom:
-        for i in range(len(lines) - 1, top_idx, -1):
-            if lines[i].strip():
-                bottom_idx = i
-                break
+        bottom_idx = _last_nonempty_from(lines, top_idx)
 
     if bottom_idx is None or bottom_idx - top_idx < pattern.min_gap:
+        return None
+
+    if pattern.scrollback_guard and _rejects_scrollback_footer(
+        lines, bottom_idx
+    ):
         return None
 
     display_start = _context_start(lines, top_idx, pattern.context_above)
@@ -264,6 +292,10 @@ _SECTION_BREAK_BLANKS = 2
 # Minimum lines between top and bottom for a valid UI block.
 _BOTTOM_UP_MIN_GAP = 2
 
+
+# How far a numbered-item bottom may sit from the pane's last non-empty
+# line and still count as a selection footer (scrollback guard).
+_SCROLLBACK_GUARD_DISTANCE = 12
 
 _CHECKBOX_CHARS_RE = re.compile(r"[☐✔☒]")
 _CURSOR_CHARS_RE = re.compile(r"[❯›]\s")
