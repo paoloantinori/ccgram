@@ -313,16 +313,6 @@ def build_directory_browser(
 
 
 # Provider display metadata: (label, icon)
-_PROVIDER_META: dict[str, tuple[str, str]] = {
-    "antigravity": ("Antigravity", "\U0001f30c"),
-    "claude": ("Claude", "\U0001f7e0"),
-    "codex": ("Codex", "\U0001f9e9"),
-    "gemini": ("Gemini", "\u264a"),
-    "pi": ("Pi", "\U0001f916"),
-    "shell": ("Shell", "\U0001f41a"),
-    "zai": ("Zai", "\U0001f7e3"),
-}
-
 _PROVIDER_ICONS: dict[str, str] = {
     "antigravity": "\U0001f30c",
     "claude": "\U0001f7e0",
@@ -330,7 +320,6 @@ _PROVIDER_ICONS: dict[str, str] = {
     "gemini": "\u264a",
     "pi": "\U0001f916",
     "shell": "\U0001f41a",
-    "zai": "\U0001f7e3",
 }
 
 

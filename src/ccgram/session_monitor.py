@@ -17,7 +17,6 @@ Re-exported from transcript_reader for backward-compatible imports.
 """
 
 import asyncio
-import os
 import contextlib
 import structlog
 import time
@@ -27,7 +26,7 @@ from typing import Any
 
 from telegram.error import TelegramError
 
-from .config import _env_float, config
+from .config import config
 from .delivery_contract import (
     DeliveryReceipt,
     activate_delivery_receipt,
@@ -78,47 +77,9 @@ _BACKOFF_MIN = 2.0
 _BACKOFF_MAX = 30.0
 _SKIP_RETRY_BASE_SECONDS = 2.0
 _SKIP_RETRY_MAX_SECONDS = 60.0
-# TASK-29: automatic replay cap. Beyond this unsettled gap a session's
-# backlog is skipped automatically (one notice, barrier persisted, the
-# same upstream machinery the manual /skip button drives). The manual
-# button alone died with the very outage it cures: its status bar was
-# starved too (2026-09-06 incident). CCGRAM_REPLAY_CAP_MB=0 disables.
-_REPLAY_CAP_BYTES = max(
-    0, int(float(os.getenv("CCGRAM_REPLAY_CAP_MB", "1") or 0) * 1_000_000)
-)
 _MSG_PREVIEW_LENGTH = 80
 
-# TASK-41: adoption stability window. A fresh herdr pane can report a
-# transient session identity for a few seconds before settling on the
-# real one; adopting on first sight minted a Telegram topic for a window
-# id that died within seconds (2026-09-22 planner incident). An unbound
-# window becomes adoptable only after its id survives this many seconds
-# of consecutive listings.
-_ADOPT_AFTER_STABLE_S = 15.0
-
-_SKIP_BACKLOG_ON_START = os.getenv(
-    "CCGRAM_SKIP_BACKLOG_ON_START", ""
-).strip().lower() in ("1", "true", "yes", "on")
 logger = structlog.get_logger()
-
-
-# TASK-35: a skip barrier whose notice cannot be delivered (topic rebind,
-# dead topic, sustained flood control) must not pause its source forever.
-# Parsed and clamped in config.py with the other CCGRAM_* tunables.
-_SKIP_BARRIER_DEADLINE_S = config.skip_barrier_deadline_s
-# TASK-36: throttle auto-skip attempts per session after a failed attempt,
-# and decline the cap heuristic when the transcript path changed since
-# tracking (worktree moves publish a different project-dir path). Clamped
-# at 1s so no value can silently disable the throttle.
-_AUTOSKIP_RETRY_S = max(1.0, _env_float("CCGRAM_AUTOSKIP_RETRY_S", 30.0))
-
-
-def _same_transcript(file_path: Path, tracked: str) -> bool:
-    """Same-file verdict tolerant of symlinked spellings of one path."""
-    try:
-        return file_path.resolve() == Path(tracked).resolve()
-    except OSError, RuntimeError:
-        return str(file_path) == tracked
 
 
 def _adoption_lookup(adoptable_window_ids: set[str]) -> set[str]:
@@ -178,14 +139,6 @@ class SessionMonitor:
         # Receipts are grouped by transcript session so one failed send only
         # freezes its own watermark.
         self._delivery_receipts: dict[str, list[DeliveryReceipt]] = {}
-        # Adoption debounce (2026-09-22 incident): a fresh herdr pane can
-        # report a transient session identity for a few seconds before
-        # settling on the real one, and adopting that transient minted a
-        # topic for a window id that died within seconds. An unbound
-        # window becomes adoptable only after its id has survived this
-        # many seconds of consecutive listings; a flap resets the clock
-        # because the id leaves the listing.
-        self._unbound_first_seen: dict[str, float] = {}
         # Backlog skips cross the monitor/queue boundary through injected
         # adapters, preserving this module's handler independence.
         self._skip_purge_callback: (
@@ -197,11 +150,7 @@ class SessionMonitor:
         ) = None
         self._skip_notice_receipts: dict[str, DeliveryReceipt] = {}
         self._skip_retry_attempts: dict[str, int] = {}
-        # Backoff table for a PENDING barrier's purge/notice steps.
         self._skip_retry_at: dict[str, float] = {}
-        # Flat pre-barrier throttle for failed auto-skip ATTEMPTS (TASK-36).
-        self._autoskip_retry_at: dict[str, float] = {}
-        self._autoskip_path_mismatch_logged: set[str] = set()
 
     # Delegation properties for backward-compatible test access
     @property
@@ -232,8 +181,6 @@ class SessionMonitor:
         """Drop receipts tied to a session identity that no longer exists."""
         self._delivery_receipts.pop(session_id, None)
         self._skip_notice_receipts.pop(session_id, None)
-        self._autoskip_retry_at.pop(session_id, None)
-        self._autoskip_path_mismatch_logged.discard(session_id)
         self._clear_skip_retry(session_id)
 
     def set_message_callback(
@@ -426,15 +373,13 @@ class SessionMonitor:
         return True
 
     def _expire_aged_skip_barriers(self) -> None:
-        """TASK-35: retire barriers whose notice never delivered.
+        """Complete barriers whose notice never delivered.
 
         A skip sacrifices history for liveness. When the visible notice
         cannot be delivered (rebound topic, dead topic, sustained flood
         control), the barrier inverts that into permanent source silence.
-        Past the deadline the barrier is decided: a validator failure
-        defers, a rebind or incomplete purge cancels so the range
-        replays, and only a current barrier with a completed purge
-        completes.
+        Past the deadline the barrier retires; the skip notice is dropped,
+        not retried.
         """
         if not self.state.pending_skips:
             return
@@ -480,6 +425,17 @@ class SessionMonitor:
             self._discard_session_delivery_state(session_id)
         # One batched write for any stamps and retirements this pass made.
         self.state.save_if_dirty()
+
+    async def _advance_skip_barriers(self) -> None:
+        """Resume attempts, then expire aged barriers, then commit delivery.
+
+        Resume runs before expiry so a process that slept past the deadline
+        still gets one notice delivery attempt; expiry then retires aged
+        barriers; commits advance what actually reached Telegram.
+        """
+        await self._resume_pending_skip_notices()
+        self._expire_aged_skip_barriers()
+        self._commit_pending_skips()
 
     async def _resume_pending_skip_notices(self) -> None:
         """Resume persisted skip barriers before reading any skipped bytes."""
@@ -640,10 +596,6 @@ class SessionMonitor:
         for session_id, file_path in direct_sessions:
             if session_id in self.state.pending_skips:
                 continue
-            if await self._maybe_auto_backlog_skip(
-                session_id, file_path, sid_to_wid.get(session_id, "")
-            ):
-                continue
             try:
                 await self._process_session_file(
                     session_id,
@@ -663,12 +615,6 @@ class SessionMonitor:
                     or session_info.session_id in self.state.pending_skips
                 ):
                     continue
-                if await self._maybe_auto_backlog_skip(
-                    session_info.session_id,
-                    session_info.file_path,
-                    sid_to_wid.get(session_info.session_id, ""),
-                ):
-                    continue
                 try:
                     await self._process_session_file(
                         session_info.session_id,
@@ -683,84 +629,6 @@ class SessionMonitor:
 
         self.state.save_if_dirty()
         return new_messages
-
-    async def _maybe_auto_backlog_skip(  # noqa: PLR0911
-        self, session_id: str, file_path: Path, window_id: str
-    ) -> bool:
-        """Auto-trigger the upstream skip barrier when the gap exceeds the cap.
-
-        Returns True when the session is (now) under a skip barrier and
-        must not be read this cycle. Resolution of (user, chat, thread)
-        comes from the bound topic; an unbound session is left alone.
-        """
-        # Lazy: thread_router is wired into session_manager which imports
-        # session_monitor; hoisting forms a startup cycle (same as below).
-        from .thread_router import thread_router
-
-        if not _REPLAY_CAP_BYTES or not window_id:
-            return False
-        if session_id in self.state.pending_skips:
-            return True
-        try:
-            session = self.state.get_session(session_id)
-            if session is None:
-                return False
-            if time.monotonic() < self._autoskip_retry_at.get(session_id, 0.0):
-                logger.debug(
-                    "Auto backlog skip throttled after a failed attempt",
-                    session_id=session_id,
-                )
-                return False
-            if session.file_path and not _same_transcript(file_path, session.file_path):
-                # The map/scan path and the tracked watermark describe two
-                # different files (a worktree move republishes the session
-                # under another project dir). Gap arithmetic across files is
-                # meaningless; replacement detection owns path changes.
-                if session_id not in self._autoskip_path_mismatch_logged:
-                    self._autoskip_path_mismatch_logged.add(session_id)
-                    logger.warning(
-                        "Auto backlog skip declined: transcript path changed "
-                        "since tracking (tracked=%s, current=%s)",
-                        session.file_path,
-                        str(file_path),
-                    )
-                return False
-            gap = file_path.stat().st_size - session.last_byte_offset
-            if gap <= _REPLAY_CAP_BYTES:
-                return False
-            for (
-                user_id,
-                chat_id,
-                thread_id,
-                bound_window,
-            ) in thread_router.iter_thread_bindings_with_chat():
-                if bound_window != window_id or chat_id is None:
-                    continue
-                intent = await self.request_backlog_skip(
-                    user_id, window_id, thread_id, chat_id
-                )
-                if intent is not None:
-                    self._autoskip_retry_at.pop(session_id, None)
-                    logger.warning(
-                        "auto backlog skip: %s gap %.1fMB exceeds cap %.1fMB",
-                        session_id,
-                        gap / 1e6,
-                        _REPLAY_CAP_BYTES / 1e6,
-                    )
-                else:
-                    # Throttle the retry: a stat race or unresolvable state
-                    # must not re-enter the attempt every poll cycle.
-                    self._autoskip_retry_at[session_id] = (
-                        time.monotonic() + _AUTOSKIP_RETRY_S
-                    )
-                # Only claim the skip when a barrier actually exists: a
-                # None intent (unresolvable session, stat race) must not
-                # silence the topic with neither barrier nor notice.
-                return intent is not None or (session_id in self.state.pending_skips)
-            return False
-        except Exception:  # noqa: BLE001  # never break the poll loop
-            logger.exception("auto backlog skip check failed for %s", session_id)
-            return False
 
     async def _process_session_file(
         self, session_id: str, file_path: Path, new_messages: list, window_id: str = ""
@@ -827,16 +695,6 @@ class SessionMonitor:
             return {}
         prefix = session_map_prefix()
         return parse_session_map(raw, prefix)
-
-    async def _settle_all_sessions_at_eof(self) -> None:
-        for session_id, session in self.state.tracked_sessions.items():
-            try:
-                size = Path(session.file_path).stat().st_size
-            except OSError:
-                continue
-            if session.last_byte_offset < size:
-                session.last_byte_offset = size
-        self.state.save_if_dirty()
 
     async def _cleanup_all_stale_sessions(self) -> None:
         """Clean up all tracked sessions not in current session_map (startup)."""
@@ -972,9 +830,6 @@ class SessionMonitor:
         bound_lookup = _adoption_lookup(
             {wid for _, _, wid in thread_router.iter_thread_bindings()}
         )
-        now = time.monotonic()
-        first_seen = self._unbound_first_seen
-        seen_this_cycle: set[str] = set()
         for window in all_windows:
             window_key = canonical_window_id(window.window_id)
             if window_key in known_lookup:
@@ -982,13 +837,6 @@ class SessionMonitor:
             if window_key in bound_lookup:
                 continue
             if not is_agent_topic_window(window, caps):
-                continue
-            seen_this_cycle.add(window_key)
-            first_seen.setdefault(window_key, now)
-            if now - first_seen[window_key] < _ADOPT_AFTER_STABLE_S:
-                # A transient composite at agent start (herdr) or a
-                # short-lived window (any backend) must not mint a topic
-                # for an id that dies seconds later. Survive first.
                 continue
             event = NewWindowEvent(
                 window_id=window.window_id,
@@ -1003,11 +851,6 @@ class SessionMonitor:
                     "New window callback error (unbound window path) for %s",
                     window.window_id,
                 )
-        # Ids absent from this listing restart their clock on return, so a
-        # flapping identity never accumulates toward the threshold.
-        for key in list(first_seen):
-            if key not in seen_this_cycle:
-                first_seen.pop(key, None)
 
     async def _emit_known_unbound_window_events(
         self,
@@ -1111,7 +954,7 @@ class SessionMonitor:
         await session_map_sync.load_session_map(raw)
         return raw
 
-    async def _monitor_loop(self) -> None:  # noqa: PLR0915
+    async def _monitor_loop(self) -> None:
         """Background poll loop."""
         logger.info("Session monitor started, polling every %ss", self.poll_interval)
 
@@ -1121,8 +964,6 @@ class SessionMonitor:
         from .session_map import session_map_sync
 
         await self._cleanup_all_stale_sessions()
-        if _SKIP_BACKLOG_ON_START:
-            await self._settle_all_sessions_at_eof()
         initial_raw = await read_session_map_raw()
         initial_map = await self._load_current_session_map(initial_raw)
         session_lifecycle.initialize(initial_map)
@@ -1199,13 +1040,9 @@ class SessionMonitor:
                         if canonical_window_id(window_id) in live_window_ids
                     }
 
-                # Resume attempts run before expiry so a process that slept
-                # past the deadline still gets one notice delivery attempt
-                # (TASK-35); then aged barriers retire, then delivery
-                # commits advance what actually reached Telegram.
-                await self._resume_pending_skip_notices()
-                self._expire_aged_skip_barriers()
-                self._commit_pending_skips()
+                # A persisted barrier must be noticed before its source is read
+                # again; this preserves the exact EOF snapshot across restarts.
+                await self._advance_skip_barriers()
                 new_messages = await self.check_for_updates(monitored_map)
                 # Register every parsed message before the next await. A
                 # shutdown cancellation between parse and dispatch must leave

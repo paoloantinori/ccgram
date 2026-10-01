@@ -112,17 +112,31 @@ def mock_deps():
         }
 
 
-async def test_unroutable_complete_message_drops_without_enqueue(bot, mock_deps):
-    """A complete unroutable message warns and enqueues nothing (antiwire)."""
-    mock_deps["sq"].find_users_for_session.return_value = []
-    await handle_new_message(_make_msg(), bot)
-    mock_deps["eq"].assert_not_called()
-
-
 async def test_no_active_users_non_deliverable_returns_early(bot, mock_deps):
     mock_deps["sq"].find_users_for_session.return_value = []
     await handle_new_message(_make_msg(content_type="thinking"), bot)
     mock_deps["eq"].assert_not_called()
+
+
+async def test_unroutable_complete_message_drops_without_enqueue(
+    bot, mock_deps, monkeypatch
+):
+    """A complete unroutable message warns and enqueues nothing."""
+    mock_deps["sq"].find_users_for_session.return_value = []
+    warned: list[tuple] = []
+    monkeypatch.setattr(
+        message_routing.logger,
+        "warning",
+        lambda msg, **kw: warned.append((msg, kw)),
+    )
+    await handle_new_message(_make_msg(text="lost reply", session_id="sess-9"), bot)
+    mock_deps["eq"].assert_not_called()
+    assert warned == [
+        (
+            "Complete assistant message has no routed topic; dropped",
+            {"session_id": "sess-9", "text_len": len("lost reply")},
+        )
+    ]
 
 
 async def test_short_thinking_is_dropped(bot, mock_deps):
@@ -152,8 +166,8 @@ async def test_interactive_tool_use_handled_skips_enqueue(bot, mock_deps):
 
 
 async def test_interactive_dispatch_survives_never_draining_queue(bot, mock_deps):
-    # TASK-34: a per-user queue whose item never completes must not freeze
-    # the sequential monitor dispatch on queue.join().
+    # A per-user queue whose item never completes must not freeze the
+    # sequential monitor dispatch on queue.join().
     queue: asyncio.Queue = asyncio.Queue()
     queue.put_nowait(object())  # never task_done -> join() blocks forever
     mock_deps["gmq"].return_value = queue

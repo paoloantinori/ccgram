@@ -69,8 +69,8 @@ class BacklogSkipIntent:
     skipped_count: int = 0
     purge_complete: bool = False
     # Wall clock at barrier creation (0 = legacy record, stamped on first
-    # sight). TASK-35: aged barriers are force-completed so an undeliverable
-    # notice cannot pause a source forever.
+    # sight). Aged barriers are force-completed so an undeliverable notice
+    # cannot pause a source forever.
     created_at: float = 0.0
 
     def to_dict(self) -> dict[str, Any]:
@@ -205,7 +205,7 @@ class MonitorState:
         self._dirty = True
 
     def stamp_skip_clock(self, session_id: str, created_at: float) -> None:
-        """Persist an aging stamp for a legacy barrier record (TASK-35).
+        """Persist an aging stamp for a legacy barrier record.
 
         Direct attribute mutation would not mark the state dirty, so a
         process restarting faster than the deadline would never age the

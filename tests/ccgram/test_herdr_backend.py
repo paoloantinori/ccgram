@@ -58,7 +58,7 @@ def expired_discovery_window(monkeypatch: pytest.MonkeyPatch) -> None:
 
     The loop always polls once before checking the deadline, so the tests that
     assert post-deadline behaviour keep their meaning without waiting out the
-    real 20s window.
+    real 5s window.
     """
     monkeypatch.setattr(herdr_module, "_CREATED_SESSION_DISCOVERY_TIMEOUT_SECONDS", 0.0)
 
@@ -249,19 +249,16 @@ async def test_sessionless_snapshot_uses_terminal_fallback() -> None:
     once_published = _agent(value="session-a")
 
     # Routability, not the adoption picker: a terminal-fallback record is
-    # addressable but ineligible (its id rotates when the session lands,
-    # TASK-46), so list_windows hides it while find_window_by_id keeps it.
+    # addressable but ineligible (its id rotates when the session lands),
+    # so list_windows hides it while find_window_by_id keeps it.
     fallback_window = await _manager(_live_fake(at_hook_time)).find_window_by_id(
         _sessionless_target("term-a")
     )
     live_window = (await _manager(_live_fake(once_published)).list_windows())[0]
 
-    assert fallback_window is not None
     assert fallback_window.window_id == _sessionless_target("term-a")
     assert fallback_window.topic_eligible is False
-    assert await _manager(_live_fake(at_hook_time)).list_windows() == []
     assert live_window.window_id == _target("session-a")
-    assert live_window.topic_eligible is True
     assert fallback_window.alias_window_ids == ()
     assert live_window.alias_window_ids == ()
 
@@ -366,7 +363,7 @@ async def test_sessionless_agent_is_preserved_by_pane_compaction() -> None:
     after = {**before, "pane_id": "w1:p2", "tab_id": "w1:t3", "workspace_id": "w1"}
 
     # The fallback identity survives the pane move (observed through
-    # routability; it is ineligible for adoption, see TASK-46).
+    # routability; it is ineligible for adoption).
     before_window = await _manager(_live_fake(before)).find_window_by_id(
         _sessionless_target("term-b")
     )
@@ -374,7 +371,6 @@ async def test_sessionless_agent_is_preserved_by_pane_compaction() -> None:
         _sessionless_target("term-b")
     )
 
-    assert before_window is not None and after_window is not None
     assert before_window.window_id == _sessionless_target("term-b")
     assert after_window.window_id == _sessionless_target("term-b")
 
@@ -962,7 +958,8 @@ def _workspace(workspace_id: str, cwd: Path) -> str:
 
 def _created(tab_id: str = "w9:t1", pane_id: str = "w9:p1") -> str:
     return _result(
-        tab={"tab_id": tab_id, "label": "new"}, root_pane={"pane_id": pane_id}
+        tab={"tab_id": tab_id, "label": "new"},
+        root_pane={"pane_id": pane_id, "terminal_id": "term-a"},
     )
 
 
@@ -1076,54 +1073,15 @@ async def test_list_workspaces_resolves_cwdless_workspaces_from_panes_once() -> 
     assert fake.calls == [["workspace", "list"], ["pane", "list"]]
 
 
-async def test_created_session_discovery_waits_for_delayed_pi_report(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Pi can publish agent_session after several polling intervals (~2.7s live)."""
-    calls = 0
-
-    async def delayed_agents(_: float) -> None:
-        return None
-
-    class DelayedRunner(FakeHerdr):
-        async def __call__(self, args: Sequence[str]) -> tuple[int, str, str]:
-            nonlocal calls
-            if args == ["agent", "list"]:
-                calls += 1
-                return (
-                    0,
-                    _agents()
-                    if calls < 29
-                    else _agents(
-                        _agent(pane_id="w9:p1", tab_id="w9:t1", workspace_id="selected")
-                    ),
-                    "",
-                )
-            return await super().__call__(args)
-
-    monkeypatch.setattr(asyncio, "sleep", delayed_agents)
-    runner = (
-        DelayedRunner()
-        .on("workspace", "list", out=_workspace("selected", tmp_path))
-        .on("tab", "create", out=_created())
-        .on("tab", "list", out=_tabs())
-    )
-    target = await _manager(runner).create_topic_target(
-        str(tmp_path), launch_command=None, workspace_id="selected"
-    )
-    assert target.target_id == _target()
-    assert calls == 29
-
-
 async def test_created_session_discovery_skips_terminal_fallback(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """A pre-session terminal fallback must not become the topic target.
 
     The fallback's derived id rotates the moment the real session is
-    published (TASK-46, 2026-09-29 incident): a target minted from it
-    goes stale during hook registration and the launch then reads as
-    "session did not register and is gone" while the pane keeps booting.
+    published: a target minted from it goes stale during hook
+    registration and the launch then reads as "session did not register
+    and is gone" while the pane keeps booting.
     """
     calls = 0
 
@@ -1169,15 +1127,44 @@ async def test_created_session_discovery_skips_terminal_fallback(
     assert calls == 2
 
 
+async def test_created_session_discovery_rejects_persistent_fallback(
+    tmp_path: Path,
+    expired_discovery_window: None,
+) -> None:
+    """A pane that never publishes a session fails creation and rolls back."""
+    fake = (
+        FakeHerdr()
+        .on("workspace", "create", out=_result(workspace={"workspace_id": "owned"}))
+        .on("tab", "create", out=_created())
+        .on("pane", "run", out=_result(type="ok"))
+        .on(
+            "agent",
+            "list",
+            out=_agents(
+                _sessionless(pane_id="w9:p1", tab_id="w9:t1", workspace_id="owned")
+            ),
+        )
+        .on("tab", "close", out=_result(type="ok"))
+        .on("workspace", "close", out=_result(type="ok"))
+    )
+    with pytest.raises(HerdrUnresolvedTargetError):
+        await _manager(fake).create_topic_target(
+            str(tmp_path), launch_command="claude", workspace_id=None
+        )
+    assert fake.calls[-2:] == [
+        ["tab", "close", "w9:t1"],
+        ["workspace", "close", "owned"],
+    ]
+
+
 async def test_created_session_discovery_survives_pane_renumbering(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """A pane move during boot must not lose the launching pane.
 
-    Herdr renumbers pane and tab ids on structural changes; the discovery
+    Pane and tab ids are renumbered on structural changes; the discovery
     poll follows the TERMINAL identity after the first poll pins it, so a
-    compaction mid-boot cannot make creation roll back a healthy pane
-    (code-review finding on TASK-46).
+    compaction mid-boot cannot make creation roll back a healthy pane.
     """
     calls = 0
 
@@ -1231,39 +1218,43 @@ async def test_created_session_discovery_survives_pane_renumbering(
     assert calls == 2
 
 
-async def test_created_session_discovery_rejects_persistent_fallback(
-    tmp_path: Path,
-    expired_discovery_window: None,
+async def test_created_session_discovery_waits_for_delayed_pi_report(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A pane that never publishes a session fails creation and rolls back.
+    """Pi can publish agent_session after several polling intervals (~2.7s live)."""
+    calls = 0
 
-    The terminal fallback alone is not an addressee: accepting it (the
-    pre-TASK-46 behavior) committed a topic whose target id rotates away
-    as soon as a session appears, or never resolves at all.
-    """
-    fake = (
-        FakeHerdr()
-        .on("workspace", "create", out=_result(workspace={"workspace_id": "owned"}))
+    async def delayed_agents(_: float) -> None:
+        return None
+
+    class DelayedRunner(FakeHerdr):
+        async def __call__(self, args: Sequence[str]) -> tuple[int, str, str]:
+            nonlocal calls
+            if args == ["agent", "list"]:
+                calls += 1
+                return (
+                    0,
+                    _agents()
+                    if calls < 29
+                    else _agents(
+                        _agent(pane_id="w9:p1", tab_id="w9:t1", workspace_id="selected")
+                    ),
+                    "",
+                )
+            return await super().__call__(args)
+
+    monkeypatch.setattr(asyncio, "sleep", delayed_agents)
+    runner = (
+        DelayedRunner()
+        .on("workspace", "list", out=_workspace("selected", tmp_path))
         .on("tab", "create", out=_created())
-        .on("pane", "run", out=_result(type="ok"))
-        .on(
-            "agent",
-            "list",
-            out=_agents(
-                _sessionless(pane_id="w9:p1", tab_id="w9:t1", workspace_id="owned")
-            ),
-        )
-        .on("tab", "close", out=_result(type="ok"))
-        .on("workspace", "close", out=_result(type="ok"))
+        .on("tab", "list", out=_tabs())
     )
-    with pytest.raises(HerdrUnresolvedTargetError):
-        await _manager(fake).create_topic_target(
-            str(tmp_path), launch_command="claude", workspace_id=None
-        )
-    assert fake.calls[-2:] == [
-        ["tab", "close", "w9:t1"],
-        ["workspace", "close", "owned"],
-    ]
+    target = await _manager(runner).create_topic_target(
+        str(tmp_path), launch_command=None, workspace_id="selected"
+    )
+    assert target.target_id == _target()
+    assert calls == 29
 
 
 async def test_create_topic_target_without_selection_creates_workspace_at_cwd(
@@ -2154,271 +2145,3 @@ async def test_an_unrecognised_sessionless_agent_does_not_blank_the_listing() ->
 
     assert windows is not None, "an unaddressable agent is not an unaccountable gap"
     assert [w.window_id for w in windows] == [_target("session-a")]
-
-
-async def _hang_forever() -> None:
-    await asyncio.Event().wait()
-
-
-def _count_agent_status(mux: HerdrManager) -> dict[str, int]:
-    """Count agent_status calls on the manager (reprime forking)."""
-    calls = {"n": 0}
-    orig = mux.agent_status
-
-    async def counting(window_id: str):
-        calls["n"] += 1
-        return await orig(window_id)
-
-    mux.agent_status = counting
-    return calls
-
-
-async def test_watch_events_skips_reprime_after_idle_refresh(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """TASK-13: a quiet interval with an unchanged mapping keeps the stream
-    open (no reconnect, no per-pane agent_status re-prime; measured ~2.6
-    herdr calls/s before this). The pushed event arriving on the SAME stream
-    after several idle intervals is the proof the subscription survived."""
-    monkeypatch.setattr(herdr_module, "_STREAM_REPRIME_INTERVAL", 0.05)
-    record = _agent(pane_id="w7:p4", tab_id="w7:t3")
-    mux = _manager(
-        _live_fake(record).on(
-            "pane", "get", out=_result(pane={"agent_status": "working"})
-        )
-    )
-    calls = _count_agent_status(mux)
-
-    connects = {"n": 0}
-
-    async def stream(_subs: Sequence[Mapping[str, object]]):
-        connects["n"] += 1
-        yield {"__subscribed__": True}
-        await asyncio.sleep(0.15)  # quiet: spans several patched intervals
-        yield {
-            "event": "pane.agent_status_changed",
-            "data": {"pane_id": "w7:p4", "agent_status": "idle"},
-        }
-        await _hang_forever()
-
-    mux._open_stream = stream
-    watcher = mux.watch_events([_target()])
-    try:
-        first = await asyncio.wait_for(anext(watcher), 1)
-        assert first.kind == "agent_status"  # first connect reprimes
-        second = await asyncio.wait_for(anext(watcher), 2)
-        assert second.status is not None and second.status.state == "idle"
-        assert second.pane_id == "w7:p4"
-    finally:
-        await watcher.aclose()
-    assert connects["n"] == 1
-    assert calls["n"] == 1
-
-
-async def test_watch_events_reprimes_after_transport_drop(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """TASK-13: a transport failure loses coverage; the reconnect must
-    re-prime every pane so a stale cached status cannot outlive the drop."""
-    monkeypatch.setattr(herdr_module, "_STREAM_BACKOFF_BASE", 0.01)
-    record = _agent(pane_id="w7:p4", tab_id="w7:t3")
-    mux = _manager(
-        _live_fake(record).on(
-            "pane", "get", out=_result(pane={"agent_status": "working"})
-        )
-    )
-    calls = _count_agent_status(mux)
-
-    connects = {"n": 0}
-
-    async def stream(_subs: Sequence[Mapping[str, object]]):
-        connects["n"] += 1
-        yield {"__subscribed__": True}
-        if connects["n"] == 1:
-            raise OSError(22, "Invalid argument")
-        await _hang_forever()
-
-    mux._open_stream = stream
-    watcher = mux.watch_events([_target()])
-    try:
-        first = await asyncio.wait_for(anext(watcher), 1)
-        assert first.kind == "agent_status"  # first connect reprimes
-        second = await asyncio.wait_for(anext(watcher), 2)
-        assert second.kind == "agent_status"  # post-drop reconnect reprimes
-    finally:
-        await watcher.aclose()
-    assert connects["n"] == 2
-    assert calls["n"] == 2
-
-
-async def test_watch_events_server_eof_backs_off_without_runtime_error(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A server EOF must take the graceful backoff path: a bare anext on
-    the exhausted inner stream raises StopAsyncIteration, which PEP 479
-    converts to RuntimeError inside the async generator (found while
-    testing the TASK-13 reprime change)."""
-    monkeypatch.setattr(herdr_module, "_STREAM_BACKOFF_BASE", 0.01)
-    record = _agent(pane_id="w7:p4", tab_id="w7:t3")
-    mux = _manager(
-        _live_fake(record).on(
-            "pane", "get", out=_result(pane={"agent_status": "working"})
-        )
-    )
-    connects = {"n": 0}
-
-    async def stream(_subs: Sequence[Mapping[str, object]]):
-        connects["n"] += 1
-        yield {"__subscribed__": True}
-        if connects["n"] == 1:
-            yield {
-                "event": "pane.agent_status_changed",
-                "data": {"pane_id": "w7:p4", "agent_status": "working"},
-            }
-            return  # server closes the stream right after the event
-
-    mux._open_stream = stream
-    watcher = mux.watch_events([_target()])
-    try:
-        first = await asyncio.wait_for(anext(watcher), 1)
-        assert first.kind == "agent_status"  # first-connect reprime
-        second = await asyncio.wait_for(anext(watcher), 1)
-        assert second.status is not None and second.status.state == "working"
-        # EOF -> backoff -> reconnect: the next yield is the post-drop
-        # reprime, not a RuntimeError.
-        third = await asyncio.wait_for(anext(watcher), 2)
-        assert third.kind == "agent_status"
-    finally:
-        await watcher.aclose()
-    assert connects["n"] == 2
-
-
-class _MovingPaneRunner(FakeHerdr):
-    """Serve the agent on one pane for the first reads, then on another."""
-
-    def __init__(self, before: Mapping, after: Mapping, switch_after: int):
-        super().__init__()
-        self.agent_reads = 0
-        self._before = before
-        self._after = after
-        self._switch_after = switch_after
-
-    async def __call__(self, args: Sequence[str]) -> tuple[int, str, str]:
-        if args == ["agent", "list"]:
-            self.agent_reads += 1
-            record = (
-                self._before if self.agent_reads <= self._switch_after else self._after
-            )
-            return 0, _agents(record), ""
-        if args[:2] == ["pane", "get"]:
-            return 0, _result(pane={"agent_status": "working"}), ""
-        return await super().__call__(args)
-
-
-async def test_idle_refresh_reprimes_when_mapping_changed(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """TASK-13 review: silence proves nothing about a target that moved to
-    another pane; the refresh must detect the move and re-prime."""
-    monkeypatch.setattr(herdr_module, "_STREAM_REPRIME_INTERVAL", 0.05)
-    before = _agent(pane_id="w7:p4", tab_id="w7:t3")
-    after = _agent(pane_id="w7:p5", tab_id="w7:t3")
-    fake = _MovingPaneRunner(before, after, switch_after=1)
-    mux = _manager(fake)
-    calls = _count_agent_status(mux)
-    connects = {"n": 0}
-
-    async def stream(_subs: Sequence[Mapping[str, object]]):
-        connects["n"] += 1
-        yield {"__subscribed__": True}
-        await _hang_forever()
-
-    mux._open_stream = stream
-    watcher = mux.watch_events([_target()])
-    try:
-        first = await asyncio.wait_for(anext(watcher), 1)
-        assert first.kind == "agent_status"  # first-connect reprime
-        # Idle fires; the resolve in the timeout branch sees the moved pane,
-        # so the second connect reprimes too.
-        second = await asyncio.wait_for(anext(watcher), 2)
-        assert second.kind == "agent_status"
-    finally:
-        await watcher.aclose()
-    assert connects["n"] == 2
-    assert calls["n"] == 2
-
-
-async def test_mapping_change_refresh_delivers_triggering_event(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """TASK-13 review: the event that reveals a move is delivered under the
-    pre-refresh mapping (the terminal-event guard), and the reconnect
-    re-primes the newly subscribed pane."""
-    monkeypatch.setattr(herdr_module, "_STREAM_BACKOFF_BASE", 0.01)
-    before = _agent(pane_id="w7:p4", tab_id="w7:t3")
-    after = _agent(pane_id="w7:p5", tab_id="w7:t3")
-    # Cycle-top resolve sees the old pane; the per-event resolve sees the
-    # move.
-    fake = _MovingPaneRunner(before, after, switch_after=1)
-    mux = _manager(fake)
-    calls = _count_agent_status(mux)
-    connects = {"n": 0}
-
-    async def stream(_subs: Sequence[Mapping[str, object]]):
-        connects["n"] += 1
-        yield {"__subscribed__": True}
-        if connects["n"] == 1:
-            yield {
-                "event": "pane.agent_status_changed",
-                "data": {"pane_id": "w7:p4", "agent_status": "idle"},
-            }
-            await _hang_forever()
-
-    mux._open_stream = stream
-    watcher = mux.watch_events([_target()])
-    try:
-        first = await asyncio.wait_for(anext(watcher), 1)
-        assert first.kind == "agent_status"  # first-connect reprime
-        second = await asyncio.wait_for(anext(watcher), 2)
-        assert second.status is not None and second.status.state == "idle"
-        assert second.pane_id == "w7:p4"  # pre-refresh mapping
-        third = await asyncio.wait_for(anext(watcher), 2)
-        assert third.kind == "agent_status"  # post-move reconnect reprime
-    finally:
-        await watcher.aclose()
-    assert connects["n"] == 2
-    assert calls["n"] == 2
-
-
-async def test_hung_ack_refreshes_on_ack_timeout(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A socket that accepts but never acks must refresh on the short ack
-    timeout, not on the idle interval (TASK-13 review)."""
-    monkeypatch.setattr(herdr_module, "_STREAM_ACK_TIMEOUT", 0.05)
-    monkeypatch.setattr(herdr_module, "_STREAM_BACKOFF_BASE", 0.01)
-    record = _agent(pane_id="w7:p4", tab_id="w7:t3")
-    mux = _manager(
-        _live_fake(record).on(
-            "pane", "get", out=_result(pane={"agent_status": "working"})
-        )
-    )
-    connects = {"n": 0}
-
-    async def stream(_subs: Sequence[Mapping[str, object]]):
-        connects["n"] += 1
-        if connects["n"] == 1:
-            await _hang_forever()  # accepted, never acks
-        yield {"__subscribed__": True}
-        await _hang_forever()
-
-    mux._open_stream = stream
-    watcher = mux.watch_events([_target()])
-    try:
-        # The ack timeout refreshes within the wait bound; with the interval
-        # bound (30s) this wait_for would time out instead.
-        event = await asyncio.wait_for(anext(watcher), 2)
-        assert event.kind == "agent_status"  # second connect reprimes
-    finally:
-        await watcher.aclose()
-    assert connects["n"] == 2

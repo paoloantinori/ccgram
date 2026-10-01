@@ -84,14 +84,6 @@ def get_wait_header(window_id: str) -> str | None:
     return get_claude_wait_header(window_id)
 
 
-def get_session_id(window_id: str) -> str | None:
-    """Return the active session_id for *window_id* from the last session map."""
-    # Lazy: session_lifecycle imports window_store + claude_task_state; defer.
-    from ..session_lifecycle import session_lifecycle  # Lazy:
-
-    return session_lifecycle.resolve_session_id(window_id)
-
-
 def get_delivery_watermark(window_id: str) -> "DeliveryWatermark | None":
     """Return the session's durable delivery state for a window.
 
@@ -142,6 +134,14 @@ class DeliveryWatermark(NamedTuple):
     watermark: int
     transcript_path: str
     fenced: bool
+
+
+def get_session_id(window_id: str) -> str | None:
+    """Return the active session_id for *window_id* from the last session map."""
+    # Lazy: session_lifecycle imports window_store + claude_task_state; defer.
+    from ..session_lifecycle import session_lifecycle  # Lazy:
+
+    return session_lifecycle.resolve_session_id(window_id)
 
 
 def get_last_activity_ts(window_id: str) -> float | None:

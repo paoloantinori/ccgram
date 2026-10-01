@@ -15,7 +15,6 @@ from ccgram.multiplexer.base import MultiplexerCapabilities, WindowRef
 from ccgram.providers.claude import ClaudeProvider
 from ccgram.providers.codex import CodexProvider
 from ccgram.session import SessionManager
-import ccgram.session_monitor as ccgram_session_monitor
 from ccgram.session_monitor import NewMessage, NewWindowEvent, SessionMonitor
 from ccgram.thread_router import thread_router
 from ccgram.telegram_client import FakeTelegramClient
@@ -607,7 +606,7 @@ class TestSettledPrefixWatermarkCommit:
         assert monitor._delivery_receipts["s1"] == [ready]
 
     def test_aged_skip_barrier_force_completes(self, monitor: SessionMonitor) -> None:
-        # TASK-35: an undeliverable notice must not pause the source forever.
+        # An undeliverable notice must not pause the source forever.
         self._track(monitor, "s1", [self._ready(100)])
         self._begin_skip(monitor)
         intent = monitor.state.pending_skips["s1"]
@@ -624,8 +623,8 @@ class TestSettledPrefixWatermarkCommit:
     def test_aged_skip_barrier_on_rebound_topic_cancels(
         self, monitor: SessionMonitor
     ) -> None:
-        # TASK-35 review: a rebound topic never advances the old watermark;
-        # the range stays replayable under the new binding.
+        # A rebound topic never advances the old watermark; the range
+        # stays replayable under the new binding.
         self._track(monitor, "s1", [self._ready(100)])
         self._begin_skip(monitor)
         intent = monitor.state.pending_skips["s1"]
@@ -641,8 +640,8 @@ class TestSettledPrefixWatermarkCommit:
     def test_aged_barrier_with_incomplete_purge_replays(
         self, monitor: SessionMonitor
     ) -> None:
-        # TASK-35 review: a barrier whose queued range was never retired
-        # must not skip those bytes silently: cancel so they replay.
+        # A barrier whose queued range was never retired must not skip
+        # those bytes silently: cancel so they replay.
         self._track(monitor, "s1", [self._ready(100)])
         self._begin_skip(monitor)
         intent = monitor.state.pending_skips["s1"]
@@ -704,8 +703,8 @@ class TestSettledPrefixWatermarkCommit:
     def test_legacy_barrier_without_stamp_gets_clock_started(
         self, monitor: SessionMonitor
     ) -> None:
-        # TASK-35: barriers persisted before the stamp are aged from first
-        # sight, not force-completed on the first cycle.
+        # Barriers persisted before the stamp are aged from first sight,
+        # not force-completed on the first cycle.
         self._begin_skip(monitor)
         assert monitor.state.pending_skips["s1"].created_at == 0.0
 
@@ -956,9 +955,6 @@ class TestEmitUnboundWindowEvents:
         window_store.window_states.clear()
         monkeypatch.setattr(SessionManager, "_load_state", lambda self: None)
         monkeypatch.setattr(SessionManager, "_save_state", lambda self: None)
-        # These tests probe eligibility, not the adoption debounce: a zero
-        # window keeps the pre-TASK-41 fire-on-first-sight behavior.
-        monkeypatch.setattr("ccgram.session_monitor._ADOPT_AFTER_STABLE_S", 0.0)
         SessionManager()
 
     async def test_tmux_surfaces_every_unbound_window(
@@ -1035,80 +1031,6 @@ class TestEmitUnboundWindowEvents:
         await monitor._emit_unbound_window_events(
             [_winref("ABC-DEF", "claude")], known_window_ids=set()
         )
-
-        cb.assert_not_awaited()
-
-
-class TestAdoptionDebounce:
-    """An unbound window is adoptable only after its id survives the
-    stability window (TASK-41: a transient herdr agent_session composite
-    at pane start minted a topic for a window that died in seconds)."""
-
-    @pytest.fixture
-    def wired(self, monkeypatch) -> None:
-        thread_router.reset()
-        window_store.window_states.clear()
-        monkeypatch.setattr(SessionManager, "_load_state", lambda self: None)
-        monkeypatch.setattr(SessionManager, "_save_state", lambda self: None)
-        SessionManager()
-
-    async def test_young_window_is_not_adopted(
-        self, monitor: SessionMonitor, wired, monkeypatch
-    ) -> None:
-        cb = AsyncMock(spec=lambda event: None)
-        monitor.set_new_window_callback(cb)
-        monkeypatch.setattr(
-            "ccgram.session_monitor.tmux_manager",
-            SimpleNamespace(capabilities=_HERDR_CAPS),
-        )
-
-        # The transient composite: alive in one listing, seconds old.
-        await monitor._emit_unbound_window_events(
-            [_winref(HERDR_TARGETS["new"], "claude")], known_window_ids=set()
-        )
-
-        cb.assert_not_awaited()
-
-    async def test_survivor_is_adopted(
-        self, monitor: SessionMonitor, wired, monkeypatch
-    ) -> None:
-        cb = AsyncMock(spec=lambda event: None)
-        monitor.set_new_window_callback(cb)
-        monkeypatch.setattr(
-            "ccgram.session_monitor.tmux_manager",
-            SimpleNamespace(capabilities=_HERDR_CAPS),
-        )
-        wid = HERDR_TARGETS["new"]
-
-        await monitor._emit_unbound_window_events([_winref(wid, "claude")], set())
-        # Age the sighting past the stability window and list it again.
-        monitor._unbound_first_seen[wid] -= (
-            ccgram_session_monitor._ADOPT_AFTER_STABLE_S + 1.0
-        )
-        await monitor._emit_unbound_window_events([_winref(wid, "claude")], set())
-
-        surfaced = {c.args[0].window_id for c in cb.call_args_list}
-        assert surfaced == {wid}
-
-    async def test_flap_restarts_the_clock(
-        self, monitor: SessionMonitor, wired, monkeypatch
-    ) -> None:
-        cb = AsyncMock(spec=lambda event: None)
-        monitor.set_new_window_callback(cb)
-        monkeypatch.setattr(
-            "ccgram.session_monitor.tmux_manager",
-            SimpleNamespace(capabilities=_HERDR_CAPS),
-        )
-        wid = HERDR_TARGETS["new"]
-
-        # Seen, then absent from a listing: the transient died. When the
-        # id reappears it must start over, not inherit the old clock.
-        await monitor._emit_unbound_window_events([_winref(wid, "claude")], set())
-        monitor._unbound_first_seen[wid] -= (
-            ccgram_session_monitor._ADOPT_AFTER_STABLE_S + 1.0
-        )
-        await monitor._emit_unbound_window_events([], set())
-        await monitor._emit_unbound_window_events([_winref(wid, "claude")], set())
 
         cb.assert_not_awaited()
 
@@ -2351,213 +2273,3 @@ class TestActiveCwdsUseTheCompleteListing:
         )
 
         assert await self._reader()._get_active_cwds() == set()
-
-
-class TestAutoBacklogSkip:
-    async def test_gap_over_cap_triggers_skip(self, monkeypatch, tmp_path):
-        import ccgram.session_monitor as sm_mod
-        from types import SimpleNamespace
-
-        calls = []
-        monitor = sm_mod.SessionMonitor.__new__(sm_mod.SessionMonitor)
-
-        async def fake_skip(user_id, window_id, thread_id, chat_id):
-            calls.append((user_id, window_id, thread_id, chat_id))
-            return SimpleNamespace()
-
-        object.__setattr__(monitor, "request_backlog_skip", fake_skip)
-        object.__setattr__(monitor, "_autoskip_retry_at", {})
-        object.__setattr__(monitor, "_autoskip_path_mismatch_logged", set())
-        big = tmp_path / "big.jsonl"
-        big.write_text("x" * 100)
-        fake_state = SimpleNamespace(
-            pending_skips=set(),
-            get_session=lambda sid: SimpleNamespace(
-                last_byte_offset=10, file_path=str(big)
-            ),
-        )
-        object.__setattr__(monitor, "state", fake_state)
-        monkeypatch.setattr(sm_mod, "_REPLAY_CAP_BYTES", 50)
-        router = SimpleNamespace(
-            iter_thread_bindings_with_chat=lambda: iter([(1, 10, 20, "wA")])
-        )
-        import ccgram.thread_router as tr_mod
-
-        monkeypatch.setattr(tr_mod, "thread_router", router)
-        assert await monitor._maybe_auto_backlog_skip("s", big, "wA") is True
-        assert calls == [(1, "wA", 20, 10)]
-
-    async def test_path_mismatch_declines_auto_skip(self, monkeypatch, tmp_path):
-        # TASK-36: the map path and the tracked watermark describing two
-        # different files must not drive the cap heuristic.
-        import ccgram.session_monitor as sm_mod
-        from types import SimpleNamespace
-
-        calls = []
-        monitor = sm_mod.SessionMonitor.__new__(sm_mod.SessionMonitor)
-
-        async def fake_skip(user_id, window_id, thread_id, chat_id):
-            calls.append((user_id, window_id, thread_id, chat_id))
-            return SimpleNamespace()
-
-        object.__setattr__(monitor, "request_backlog_skip", fake_skip)
-        object.__setattr__(monitor, "_autoskip_retry_at", {})
-        object.__setattr__(monitor, "_autoskip_path_mismatch_logged", set())
-        big = tmp_path / "big.jsonl"
-        big.write_text("x" * 100)
-        object.__setattr__(
-            monitor,
-            "state",
-            SimpleNamespace(
-                pending_skips=set(),
-                get_session=lambda sid: SimpleNamespace(
-                    last_byte_offset=10,
-                    file_path=str(tmp_path / "tracked-elsewhere.jsonl"),
-                ),
-            ),
-        )
-        monkeypatch.setattr(sm_mod, "_REPLAY_CAP_BYTES", 50)
-        router = SimpleNamespace(
-            iter_thread_bindings_with_chat=lambda: iter([(1, 10, 20, "wA")])
-        )
-        import ccgram.thread_router as tr_mod
-
-        monkeypatch.setattr(tr_mod, "thread_router", router)
-        assert await monitor._maybe_auto_backlog_skip("s", big, "wA") is False
-        assert calls == []
-
-    async def test_failed_auto_skip_attempt_throttles(self, monkeypatch, tmp_path):
-        # TASK-36: a None intent must not re-enter the attempt every poll.
-        import ccgram.session_monitor as sm_mod
-        from types import SimpleNamespace
-
-        calls = []
-        monitor = sm_mod.SessionMonitor.__new__(sm_mod.SessionMonitor)
-
-        async def fake_skip(user_id, window_id, thread_id, chat_id):
-            calls.append((user_id, window_id, thread_id, chat_id))
-            return None
-
-        object.__setattr__(monitor, "request_backlog_skip", fake_skip)
-        object.__setattr__(monitor, "_autoskip_retry_at", {})
-        object.__setattr__(monitor, "_autoskip_path_mismatch_logged", set())
-        big = tmp_path / "big.jsonl"
-        big.write_text("x" * 100)
-        object.__setattr__(
-            monitor,
-            "state",
-            SimpleNamespace(
-                pending_skips=set(),
-                get_session=lambda sid: SimpleNamespace(
-                    last_byte_offset=10, file_path=str(big)
-                ),
-            ),
-        )
-        monkeypatch.setattr(sm_mod, "_REPLAY_CAP_BYTES", 50)
-        router = SimpleNamespace(
-            iter_thread_bindings_with_chat=lambda: iter([(1, 10, 20, "wA")])
-        )
-        import ccgram.thread_router as tr_mod
-
-        monkeypatch.setattr(tr_mod, "thread_router", router)
-        assert await monitor._maybe_auto_backlog_skip("s", big, "wA") is False
-        assert await monitor._maybe_auto_backlog_skip("s", big, "wA") is False
-        assert calls == [(1, "wA", 20, 10)]
-
-    async def test_small_gap_reads_normally(self, monkeypatch, tmp_path):
-        import ccgram.session_monitor as sm_mod
-        from types import SimpleNamespace
-
-        monitor = sm_mod.SessionMonitor.__new__(sm_mod.SessionMonitor)
-        object.__setattr__(monitor, "_autoskip_retry_at", {})
-        object.__setattr__(monitor, "_autoskip_path_mismatch_logged", set())
-        f = tmp_path / "s.jsonl"
-        f.write_text("x" * 10)
-        object.__setattr__(
-            monitor,
-            "state",
-            SimpleNamespace(
-                pending_skips=set(),
-                get_session=lambda sid: SimpleNamespace(
-                    last_byte_offset=0, file_path=str(f)
-                ),
-            ),
-        )
-        monkeypatch.setattr(sm_mod, "_REPLAY_CAP_BYTES", 1_000_000)
-        assert await monitor._maybe_auto_backlog_skip("s", f, "wA") is False
-
-    async def test_unbound_window_never_skips(self, monkeypatch, tmp_path):
-        import ccgram.session_monitor as sm_mod
-        from types import SimpleNamespace
-
-        monitor = sm_mod.SessionMonitor.__new__(sm_mod.SessionMonitor)
-        object.__setattr__(monitor, "_autoskip_retry_at", {})
-        object.__setattr__(monitor, "_autoskip_path_mismatch_logged", set())
-        f = tmp_path / "s.jsonl"
-        f.write_text("x" * 100)
-        object.__setattr__(
-            monitor,
-            "state",
-            SimpleNamespace(
-                pending_skips=set(),
-                get_session=lambda sid: SimpleNamespace(
-                    last_byte_offset=0, file_path=str(f)
-                ),
-            ),
-        )
-        monkeypatch.setattr(sm_mod, "_REPLAY_CAP_BYTES", 50)
-        router = SimpleNamespace(iter_thread_bindings_with_chat=lambda: iter([]))
-        import ccgram.thread_router as tr_mod
-
-        monkeypatch.setattr(tr_mod, "thread_router", router)
-        assert await monitor._maybe_auto_backlog_skip("s", f, "wA") is False
-
-
-class TestAutoBacklogSkipGuards:
-    async def test_failed_intent_does_not_silence(self, monkeypatch, tmp_path):
-        import ccgram.session_monitor as sm_mod
-        from types import SimpleNamespace
-
-        monitor = sm_mod.SessionMonitor.__new__(sm_mod.SessionMonitor)
-
-        async def failing_skip(user_id, window_id, thread_id, chat_id):
-            return None
-
-        object.__setattr__(monitor, "request_backlog_skip", failing_skip)
-        object.__setattr__(monitor, "_autoskip_retry_at", {})
-        object.__setattr__(monitor, "_autoskip_path_mismatch_logged", set())
-        f = tmp_path / "s.jsonl"
-        f.write_text("x" * 100)
-        object.__setattr__(
-            monitor,
-            "state",
-            SimpleNamespace(
-                pending_skips=set(),
-                get_session=lambda sid: SimpleNamespace(
-                    last_byte_offset=0, file_path=str(f)
-                ),
-            ),
-        )
-        monkeypatch.setattr(sm_mod, "_REPLAY_CAP_BYTES", 50)
-        import ccgram.thread_router as tr_mod
-
-        monkeypatch.setattr(
-            tr_mod,
-            "thread_router",
-            SimpleNamespace(
-                iter_thread_bindings_with_chat=lambda: iter([(1, 10, 20, "wA")])
-            ),
-        )
-        # No barrier persisted: the session must be read normally.
-        assert await monitor._maybe_auto_backlog_skip("s", f, "wA") is False
-
-    async def test_negative_cap_is_disabled(self, monkeypatch, tmp_path):
-        import ccgram.session_monitor as sm_mod
-        from types import SimpleNamespace
-
-        monkeypatch.setattr(sm_mod, "_REPLAY_CAP_BYTES", -1)
-        monitor = sm_mod.SessionMonitor.__new__(sm_mod.SessionMonitor)
-        object.__setattr__(monitor, "state", SimpleNamespace(pending_skips=set()))
-        f = tmp_path / "s.jsonl"
-        f.write_text("x")
-        assert await monitor._maybe_auto_backlog_skip("s", f, "w") is False

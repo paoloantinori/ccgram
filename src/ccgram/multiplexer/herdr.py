@@ -49,7 +49,6 @@ from pathlib import Path
 import structlog
 
 from ..herdr_targets import (
-    HerdrSessionComposite,
     canonical_session_bytes,
     herdr_session_target_id,
     is_herdr_session_target,
@@ -145,20 +144,19 @@ _CALL_TIMEOUT_SECONDS = 8.0
 # New Pi sessions have been observed to publish their agent_session in ~2.7s.
 # Keep creation discovery bounded, while allowing slow hook/integration startup.
 # A freshly launched agent must publish its session within this budget
-# for topic creation to commit. Boot under load (zai wrapper env block +
-# claude startup) has been measured past 5s (2026-09-29, TASK-46), and
-# creation waits for the stable session-backed identity, not the
-# terminal fallback, so the budget has to cover real boot time. The
-# poll interval stays a coarse 0.5s: each poll is a full agent.list
-# subprocess, and a 20s window at 0.1s would spawn it ~200 times per
-# slow launch.
+# for topic creation to commit. Boot under load has been measured past 5s
+# (2026-09-29 incident), and creation waits for the stable session-backed
+# identity, not the terminal fallback, so the budget has to cover real
+# boot time. The poll interval stays a coarse 0.5s: each poll is a full
+# agent.list subprocess, and a 20s window at 0.1s would spawn it ~200
+# times per slow launch.
 _CREATED_SESSION_DISCOVERY_TIMEOUT_SECONDS = 20.0
 _CREATED_SESSION_POLL_INTERVAL_SECONDS = 0.5
 
-# The terminal-derived identity Herdr publishes for a recognized agent
-# whose session has not been reported yet. It rotates to the session
-# identity the moment the agent publishes, so it must never become a
-# topic target or an adoption candidate (TASK-46).
+# The terminal-derived identity published for a recognized agent whose
+# session has not been reported yet. It rotates to the session identity
+# the moment the agent publishes, so it must never become a topic target
+# or an adoption candidate.
 _TERMINAL_FALLBACK_KIND = "terminal"
 
 # Agent TUIs (Claude Code, Codex, Pi) read a submit key that arrives in the
@@ -172,19 +170,9 @@ _SEND_ENTER_DELAY_SECONDS = 0.5
 # Event-stream reconnect backoff (seconds): exponential, capped.
 _STREAM_BACKOFF_BASE = 1.0
 _STREAM_BACKOFF_MAX = 30.0
-# A live stream has no locator-change notification. Refresh the subscription
-# when no event arrives for this long, so a target that moved to another pane
-# gets a fresh per-pane subscription. Digest moves are also caught within ~2s
-# by the supervisor's bound-set restart, so this only covers pane moves the
-# bound set cannot see; a moved target's blind spot is bounded by this
-# interval plus one reconnect, after which the cycle re-primes (TASK-13).
-_STREAM_REPRIME_INTERVAL = 30.0
-# Bound for the connect + ack read (the first read runs it lazily). Generous:
-# a herdr daemon that is merely slow (load, stalled unix socket) must still
-# subscribe when its ack eventually lands; only a socket that never acks at
-# all is a connection failure, and waiting the full backoff cap to call it
-# one is acceptable (TASK-13 review).
-_STREAM_ACK_TIMEOUT = 30.0
+# A live stream has no locator-change notification. Re-prime periodically so a
+# target that moved to another pane receives a fresh per-pane subscription.
+_STREAM_REPRIME_INTERVAL = 5.0
 
 
 def _workspace_cwd_from_panes(
@@ -249,6 +237,16 @@ class HerdrAmbiguousTargetError(HerdrError):
 
 
 @dataclass(frozen=True)
+class HerdrSessionComposite:
+    """The complete input for an opaque Herdr target identity."""
+
+    source: str
+    agent: str
+    kind: str
+    value: str
+
+
+@dataclass(frozen=True)
 class HerdrLiveRecord:
     """One detected agent and its short-lived current Herdr locator."""
 
@@ -288,6 +286,8 @@ def _session_composite(record: Mapping[str, object]) -> HerdrSessionComposite | 
     )
 
 
+
+
 def _parse_live_record(record: Mapping[str, object]) -> HerdrLiveRecord | None:
     composite = _session_composite(record)
     locators = {
@@ -309,10 +309,8 @@ def _parse_live_record(record: Mapping[str, object]) -> HerdrLiveRecord | None:
         terminal_id = locators["terminal_id"]
         if agent not in {"claude", "codex", "gemini"} or terminal_id is None:
             return None
-        # The terminal identity is a BOOT-GAP identity only: a pane that
-        # never publishes a session never becomes a topic target (creation
-        # requires the session-backed record; see _await_created_session_target).
-        # Pi is excluded entirely: Herdr publishes its durable session shortly
+        # Providers that may remain sessionless still expose a unique terminal
+        # identity. Pi is excluded: Herdr publishes its durable session shortly
         # after startup, and creating a terminal topic in that gap would create
         # a second topic when the durable identity arrives.
         composite = HerdrSessionComposite(
@@ -734,10 +732,7 @@ class HerdrManager:
         place that decides what counts: it emits a record only for a live agent
         carrying a guarded target, and a bare shell pane never reaches it. The
         verdict travels on the window so discovery needs no herdr-shaped check
-        of its own. A terminal-fallback record is ineligible: adopting it
-        would mint a topic on a digest that rotates the moment the agent
-        publishes its session (TASK-46); the topic-mapping contract already
-        says a sessionless detected agent does not become a topic.
+        of its own.
         """
         return WindowRef(
             window_id=record.target_id,
@@ -745,8 +740,8 @@ class HerdrManager:
             cwd=record.cwd,
             pane_current_command=record.composite.agent,
             topic_eligible=adoptable
-            and is_herdr_session_target(record.target_id)
             and record.composite.kind != _TERMINAL_FALLBACK_KIND
+            and is_herdr_session_target(record.target_id)
             and bool(record.composite.agent.strip()),
         )
 
@@ -1224,16 +1219,6 @@ class HerdrManager:
         del window_id
         return None
 
-    async def _targets_moved(
-        self,
-        window_ids: Sequence[str],
-        pane_to_window: Mapping[str, str],
-        tab_to_windows: Mapping[str, tuple[str, ...]],
-    ) -> bool:
-        """Whether a fresh snapshot moved any watched pane/tab locator."""
-        fresh_panes, fresh_tabs = await self._resolve_event_targets(window_ids)
-        return fresh_panes != pane_to_window or fresh_tabs != tab_to_windows
-
     async def _resolve_event_targets(
         self, window_ids: Sequence[str]
     ) -> tuple[dict[str, str], dict[str, tuple[str, ...]]]:
@@ -1345,61 +1330,109 @@ class HerdrManager:
         tab_id: str,
         pane_id: str,
         workspace_id: str | None,
+        terminal_id: str | None = None,
     ) -> HerdrLiveRecord:
         """Wait for the pane's stable, session-backed identity.
 
         Only a complete session composite counts. A terminal-fallback
-        record (the pane's claude has started but not yet published its
+        record (the pane's agent has started but not yet published its
         session) is deliberately skipped: its derived target rotates the
         moment the real session appears, and a target minted from it
         goes stale during hook registration, which reads as "session
-        did not register and is gone" while the pane boots on
-        (2026-09-29 incident, TASK-46).
+        did not register and is gone" while the pane boots on.
         """
         loop = asyncio.get_running_loop()
         deadline = loop.time() + _CREATED_SESSION_DISCOVERY_TIMEOUT_SECONDS
         # The first poll pins the pane by the locators the creation
         # transaction owns; every later poll follows the TERMINAL identity
-        # instead. Herdr renumbers pane and tab ids on structural changes
-        # (compaction), so a slow boot whose pane moves mid-wait would never
-        # re-match on locators and the transaction would roll back a healthy
-        # pane (the TASK-46 failure shape through a different door). The
-        # terminal id is the one locator that survives renumbering.
-        terminal_id: str | None = None
+        # instead. Pane and tab ids are renumbered on structural changes
+        # (compaction), so a slow boot whose pane moved mid-wait would
+        # never re-match on locators and the transaction would roll back
+        # a healthy pane. The terminal id survives renumbering.
+        pinned_seen = False
         while True:
             records = await self._agent_list_snapshot()
-            if terminal_id is None:
-                pinned = [
-                    record
-                    for record in records
-                    if record.tab_id == tab_id
-                    and record.pane_id == pane_id
-                    and (workspace_id is None or record.workspace_id == workspace_id)
-                ]
-                if len(pinned) == 1:
-                    terminal_id = pinned[0].terminal_id
-                elif len(pinned) > 1:
-                    raise HerdrAmbiguousTargetError(
-                        "new Herdr pane reported duplicate sessions"
-                    )
-            matches: list[HerdrLiveRecord] = []
-            if terminal_id is not None:
-                matches = [
-                    record
-                    for record in records
-                    if record.terminal_id == terminal_id
-                    and record.composite.kind != _TERMINAL_FALLBACK_KIND
-                ]
-            if len(matches) == 1:
-                return matches[0]
+            terminal_id, pinned_seen = self._advance_created_session_pin(
+                records,
+                tab_id=tab_id,
+                pane_id=pane_id,
+                workspace_id=workspace_id,
+                terminal_id=terminal_id,
+                pinned_seen=pinned_seen,
+            )
+            matches = self._session_backed_matches(records, terminal_id)
             if len(matches) > 1:
                 raise HerdrAmbiguousTargetError(
                     "new Herdr pane reported duplicate sessions"
                 )
+            if len(matches) == 1:
+                first = matches[0]
+                # Guard the pre-pinned identity: before any poll has
+                # confirmed the created pane at this terminal (a sibling
+                # agent cannot share a terminal id with it, but a stale or
+                # misattributed record could sit there), the match must
+                # also carry one of the creation locators. Once the first
+                # poll confirms the pane, renumbering may change both
+                # locators, so later polls trust the terminal id alone.
+                if pinned_seen or first.tab_id == tab_id or first.pane_id == pane_id:
+                    return first
             if loop.time() >= deadline:
                 break
             await asyncio.sleep(_CREATED_SESSION_POLL_INTERVAL_SECONDS)
         raise HerdrUnresolvedTargetError("new Herdr pane did not report a session")
+
+    @staticmethod
+    def _advance_created_session_pin(
+        records: Sequence[HerdrLiveRecord],
+        *,
+        tab_id: str,
+        pane_id: str,
+        workspace_id: str | None,
+        terminal_id: str | None,
+        pinned_seen: bool,
+    ) -> tuple[str | None, bool]:
+        """Advance the created-pane pin one poll; returns (terminal, pinned).
+
+        A pre-pinned terminal is confirmed by any record (a terminal
+        fallback counts) at the creation locators. Without one, the first
+        unique record at the creation locators supplies the terminal id.
+        """
+        if terminal_id is not None:
+            if pinned_seen:
+                return terminal_id, True
+            return terminal_id, any(
+                record.terminal_id == terminal_id
+                and (record.tab_id == tab_id or record.pane_id == pane_id)
+                for record in records
+            )
+        pinned = [
+            record
+            for record in records
+            if record.tab_id == tab_id
+            and record.pane_id == pane_id
+            and (workspace_id is None or record.workspace_id == workspace_id)
+        ]
+        if len(pinned) > 1:
+            raise HerdrAmbiguousTargetError(
+                "new Herdr pane reported duplicate sessions"
+            )
+        if len(pinned) == 1:
+            return pinned[0].terminal_id, True
+        return None, False
+
+    @staticmethod
+    def _session_backed_matches(
+        records: Sequence[HerdrLiveRecord], terminal_id: str | None
+    ) -> list[HerdrLiveRecord]:
+        """Session-published records at one terminal, fallbacks excluded."""
+        if terminal_id is None:
+            return []
+        return [
+            record
+            for record in records
+            if record.terminal_id == terminal_id
+            and record.composite.kind != _TERMINAL_FALLBACK_KIND
+        ]
 
     async def create_topic_target(  # noqa: C901
         self,
@@ -1459,6 +1492,9 @@ class HerdrManager:
             root = (result or {}).get("root_pane") or {}
             tab_id = tab.get("tab_id") if isinstance(tab, Mapping) else None
             pane_id = root.get("pane_id") if isinstance(root, Mapping) else None
+            created_terminal_id = (
+                root.get("terminal_id") if isinstance(root, Mapping) else None
+            )
             label = tab.get("label") if isinstance(tab, Mapping) else None
             if not isinstance(tab_id, str) or not tab_id:
                 raise HerdrError("herdr tab creation returned no tab id")
@@ -1476,6 +1512,9 @@ class HerdrManager:
                 tab_id=tab_id,
                 pane_id=pane_id,
                 workspace_id=workspace_id,
+                terminal_id=created_terminal_id
+                if isinstance(created_terminal_id, str)
+                else None,
             )
             refs = await self._project_live_refs([record])
             if len(refs) != 1:
@@ -1544,6 +1583,7 @@ class HerdrManager:
         if not tab_id:
             tab_id = workspace.get("active_tab_id", "")
         pane_id = root_pane.get("pane_id")
+        created_terminal_id = root_pane.get("terminal_id")
         if not isinstance(tab_id, str) or not tab_id:
             return False, "herdr worktree created without a tab id", "", ""
         if not isinstance(pane_id, str) or not pane_id:
@@ -1570,6 +1610,9 @@ class HerdrManager:
                 tab_id=tab_id,
                 pane_id=pane_id,
                 workspace_id=workspace_id,
+                terminal_id=created_terminal_id
+                if isinstance(created_terminal_id, str)
+                else None,
             )
         except BaseException as exc:
             await self._call_ok(["tab", "close", tab_id])
@@ -1603,19 +1646,12 @@ class HerdrManager:
         Subscribes to global ``tab.closed`` plus per-pane
         ``pane.agent_status_changed`` for the active panes of *window_ids*
         (agent-status subscriptions require a pane id). Reprimes each pane's
-        current status once the subscription is live: every reconnect here
-        follows a real coverage loss (transport failure, server EOF, failed
-        handshake, first connection, or a mapping move, whose events went to
-        a subscription this stream never held). A quiet interval with an
-        unchanged mapping keeps the same stream open instead, so neither the
-        reconnect nor the per-pane agent_status re-prime ever runs while the
-        watched set is stable (measured ~2.6 herdr calls/s sustained at 17
-        windows before this, TASK-13).
-        Yields translated events until the stream drops and reconnects with
-        backoff. Cancelling the iterator closes the socket. The watched set
-        is fixed per call: herdr cannot add subscriptions to a live
-        connection, so the consumer restarts this iterator with a new set
-        when bindings change.
+        current status once the subscription is live (on the ``SUBSCRIBED``
+        sentinel, so a status change during reprime is buffered, not lost), then
+        yields translated events until the stream drops and reconnects with
+        backoff. Cancelling the iterator closes the socket. The watched set is
+        fixed per call: herdr cannot add subscriptions to a live connection, so
+        the consumer restarts this iterator with a new set when bindings change.
         """
         ids = list(window_ids)
         backoff = _STREAM_BACKOFF_BASE
@@ -1634,67 +1670,41 @@ class HerdrManager:
                 ),
             ]
             refresh_subscriptions = False
-            ack_phase = True
             try:
                 async with contextlib.aclosing(
                     self._open_stream(subscriptions)
                 ) as stream:
-                    pending_event: asyncio.Task[dict | None] | None = None
+                    pending_event: asyncio.Task[dict] | None = None
                     try:
                         while True:
                             if pending_event is None:
-                                # anext(stream) bare would raise StopAsyncIteration
-                                # on a server EOF, which PEP 479 turns into
-                                # RuntimeError inside this async generator; the
-                                # default converts EOF into the graceful break
-                                # below.
-                                pending_event = asyncio.create_task(anext(stream, None))
-                            # asyncio.wait (unlike asyncio.timeout) leaves the read
-                            # alive when it expires: a quiet interval must not kill
-                            # the stream, or the unchanged-mapping skip below could
-                            # never keep the subscription open (TASK-13 review).
+                                pending_event = asyncio.create_task(anext(stream))
                             done, _ = await asyncio.wait(
-                                {pending_event},
-                                timeout=_STREAM_ACK_TIMEOUT
-                                if ack_phase
-                                else _STREAM_REPRIME_INTERVAL,
+                                {pending_event}, timeout=_STREAM_REPRIME_INTERVAL
                             )
                             if not done:
-                                if ack_phase:
-                                    # The handshake never completed within the
-                                    # ack bound: a connection failure. Break to
-                                    # the backoff path; the eventual connect
-                                    # re-primes (the first prime never ran).
-                                    # The finally below cancels and awaits the
-                                    # still-pending read.
-                                    break
-                                # No event may arrive after a target moves because
-                                # Herdr subscriptions are pane-specific. Silence
-                                # alone proves nothing about a target that moved:
-                                # check the mapping. An unchanged one means the
-                                # quiet was real, so keep the same stream open (no
-                                # reconnect, no re-prime); a moved one re-subscribes
-                                # (TASK-13 review).
-                                if not await self._targets_moved(
-                                    ids, pane_to_window, tab_to_windows
+                                # Keep the socket read pending while checking
+                                # whether pane-specific subscriptions changed.
+                                (
+                                    fresh_panes,
+                                    fresh_tabs,
+                                ) = await self._resolve_event_targets(ids)
+                                if (
+                                    fresh_panes != pane_to_window
+                                    or fresh_tabs != tab_to_windows
                                 ):
-                                    continue
-                                refresh_subscriptions = True
+                                    refresh_subscriptions = True
+                                    break
+                                continue
+                            try:
+                                obj = pending_event.result()
+                            except StopAsyncIteration:
+                                pending_event = None
                                 break
-                            obj = pending_event.result()
                             pending_event = None
-                            if obj is None:
-                                # Server closed the stream: a coverage loss, not a
-                                # healthy refresh.
-                                break
                             if is_subscribed_sentinel(obj):
-                                # Subscription is live: the ack phase is over
-                                # (later waits use the idle interval, not the ack
-                                # bound), and reaching a sentinel at all means the
-                                # previous cycle lost coverage (drop, EOF, failed
-                                # handshake, first connection, or a pane move), so
-                                # re-prime the status cache now.
-                                ack_phase = False
+                                # Subscription is live — reprime now so the status
+                                # cache isn't cold. Events are buffered meanwhile.
                                 backoff = _STREAM_BACKOFF_BASE
                                 for pane_id, window_id in pane_to_window.items():
                                     status = await self.agent_status(window_id)
@@ -1706,10 +1716,8 @@ class HerdrManager:
                                             status=status,
                                         )
                                 continue
-                            # Terminal events identify the pane/tab that just vanished.
-                            # Resolve and emit them through the pre-refresh guard: a
-                            # fresh snapshot cannot contain the closed locator, so
-                            # refreshing first would silently drop the close event.
+                            # Resolve terminal events through the pre-refresh guard:
+                            # a fresh snapshot cannot contain a closed locator.
                             guarded_terminal_events = tuple(
                                 event
                                 for event in translate_event(
@@ -1721,38 +1729,33 @@ class HerdrManager:
                                 for event in guarded_terminal_events:
                                     yield event
                                 continue
-                            # Agent locators can move while a stream is open. Herdr does
-                            # not support incremental subscription updates, so deliver
-                            # the triggering event under the pre-refresh mapping first
-                            # (the same guard terminal events use: the move must not
-                            # drop a concurrent status update), then reconnect when
-                            # the guarded mapping changed (TASK-13 review).
+                            # Status events may reveal a moved agent. Reconnect before
+                            # translating them if the guarded mapping changed.
+                            fresh_panes, fresh_tabs = await self._resolve_event_targets(
+                                ids
+                            )
+                            if (
+                                fresh_panes != pane_to_window
+                                or fresh_tabs != tab_to_windows
+                            ):
+                                refresh_subscriptions = True
+                                break
                             for event in translate_event(
                                 obj, pane_to_window, tab_to_windows
                             ):
                                 yield event
-                            if await self._targets_moved(
-                                ids, pane_to_window, tab_to_windows
-                            ):
-                                refresh_subscriptions = True
-                                break
                     finally:
-                        # Cancel any still-pending read and await its unwinding BEFORE
-                        # aclosing closes the stream: closing a generator that still
-                        # has a driver in flight raises RuntimeError (TASK-13 review).
                         if pending_event is not None:
                             pending_event.cancel()
                             await asyncio.gather(pending_event, return_exceptions=True)
-            except OSError as exc:
+            except (OSError, HerdrError) as exc:
                 logger.debug("herdr event stream error: %s", exc)
             if refresh_subscriptions:
-                # A move-triggered re-subscription, not a transport failure:
-                # no backoff. The next cycle re-primes: the moved pane's
-                # events went to a subscription this stream never held.
+                # A mapping change is a healthy re-subscription, not a transport
+                # failure; do not penalize it with exponential backoff.
                 continue
-            # Clean EOF, socket error, or failed handshake → coverage was
-            # lost: back off, then reconnect with the full set (incremental
-            # subscribe is unsupported) and re-prime.
+            # Clean EOF or socket error → back off, then reconnect with the full
+            # set (incremental subscribe is unsupported) and reprime.
             await asyncio.sleep(backoff)
             backoff = min(backoff * 2, _STREAM_BACKOFF_MAX)
 

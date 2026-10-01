@@ -51,13 +51,10 @@ def _handle_unroutable_message(msg: NewMessage) -> None:
     """Warn about a complete message that found no routed topic.
 
     The window-session link can lag reality right after a restart or an
-    adoption (2026-09-29 antiwire incident: complete messages dropped
-    silently with only a DEBUG line because find_users_for_session
-    returned empty for a bound, tracked session). The warning makes the
-    class visible; durable recovery belongs to the delivery contract
-    (receipt.fail plus restart replay, the TASK-48 follow-up) rather
-    than an in-memory retry, which would violate the per-user
-    receive-order contract and lose to any restart inside its window.
+    adoption: a bound, tracked session can resolve empty, and complete
+    assistant messages were dropped with only a DEBUG line (invisible in
+    the journal). The warning makes the class visible; non-deliverable
+    content stays at DEBUG.
     """
     deliverable = (
         msg.is_complete and msg.role == "assistant" and msg.content_type == "text"
@@ -180,10 +177,7 @@ async def enqueue_backlog_skip_notice(client: TelegramClient, intent: object) ->
         raise RuntimeError("backlog skip notice could not enter the delivery queue")
 
 
-async def handle_new_message(  # noqa: C901, PLR0912
-    msg: NewMessage,
-    client: TelegramClient,
-) -> None:
+async def handle_new_message(msg: NewMessage, client: TelegramClient) -> None:  # noqa: C901, PLR0912
     """Handle a new assistant message — enqueue for sequential processing.
 
     Messages are queued per-user to ensure status messages always appear last.

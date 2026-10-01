@@ -19,7 +19,6 @@ Key functions:
 """
 
 import asyncio
-import os
 import time
 from weakref import WeakValueDictionary
 
@@ -36,23 +35,6 @@ from ...window_state_ports import identity_state
 from ..provider_display import provider_topic_name, strip_provider_prefix
 
 logger = structlog.get_logger()
-
-# Fork gate (config surface stays out of core config): with
-# CCGRAM_TOPIC_EMOJI=off this module never writes topic titles. The
-# status bubble inside the topic still shows every state; the title
-# stays whatever the user (or the naming extension) last set.
-_TITLE_WRITES_DISABLED = os.getenv("CCGRAM_TOPIC_EMOJI", "").strip().lower() == "off"
-
-
-def title_writes_disabled() -> bool:
-    """Fork gate shared by every title writer outside this module.
-
-    Creation/bind/recovery/resume rename topics to the window name plus
-    badges; with quiet titles they skip the write and leave the name to
-    the user (or the naming extension).
-    """
-    return _TITLE_WRITES_DISABLED
-
 
 _TOPIC_NAME_LIMIT = 128
 
@@ -355,7 +337,7 @@ async def sync_topic_name(
     Preserves the last known lifecycle emoji when it is cached so `/sync`
     can repair stale titles without waiting for a later state transition.
     """
-    if _TITLE_WRITES_DISABLED or chat_id in _disabled_chats:
+    if chat_id in _disabled_chats:
         return
 
     key = (chat_id, thread_id)
@@ -430,8 +412,6 @@ async def update_topic_emoji(
         state: One of "active", "idle", "done", "dead"
         display_name: Base topic name (without emoji prefix)
     """
-    if _TITLE_WRITES_DISABLED:
-        return
     if chat_id in _disabled_chats:
         return
 

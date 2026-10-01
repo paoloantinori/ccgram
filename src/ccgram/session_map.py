@@ -625,11 +625,11 @@ class SessionMapSync:
     async def wait_for_session_map_entry(
         self,
         window_id: str,
-        # Headroom for the hook write, NOT herdr's creation-discovery
-        # budget: this wait starts only after creation has already seen the
+        # Headroom for the hook write, NOT the creation-discovery budget:
+        # this wait starts only after creation has already seen the
         # session-backed record, so it covers the residual gap between the
         # agent publishing its session and the SessionStart hook landing in
-        # session_map.json (slow boots measured past the old 5s, TASK-46).
+        # session_map.json (slow boots measured past the old 5s).
         timeout: float = 15.0,
         interval: float = 0.5,
         *,
