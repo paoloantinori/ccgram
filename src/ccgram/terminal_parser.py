@@ -256,9 +256,7 @@ def _try_extract(lines: list[str], pattern: UIPattern) -> InteractiveUIContent |
     if bottom_idx is None or bottom_idx - top_idx < pattern.min_gap:
         return None
 
-    if pattern.scrollback_guard and _rejects_scrollback_footer(
-        lines, bottom_idx
-    ):
+    if pattern.scrollback_guard and _rejects_scrollback_footer(lines, bottom_idx):
         return None
 
     display_start = _context_start(lines, top_idx, pattern.context_above)

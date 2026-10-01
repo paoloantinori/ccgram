@@ -1181,11 +1181,15 @@ class TestScrollbackGuard:
         assert result is not None and result.name == "SelectionUI"
 
     def test_action_hint_footer_matches_from_any_distance(self):
-        pane = [
-            "❯ Option A",
-            "  1. whatever",
-        ] + [f"  more scrollback {i}" for i in range(20)] + [
-            "  Esc to cancel",
-        ]
+        pane = (
+            [
+                "❯ Option A",
+                "  1. whatever",
+            ]
+            + [f"  more scrollback {i}" for i in range(20)]
+            + [
+                "  Esc to cancel",
+            ]
+        )
         result = extract_interactive_content(pane)
         assert result is not None
