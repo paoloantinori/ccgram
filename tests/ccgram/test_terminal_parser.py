@@ -1193,3 +1193,13 @@ class TestScrollbackGuard:
         )
         result = extract_interactive_content(pane)
         assert result is not None
+
+
+class TestScrollbackGuardLongList:
+    def test_long_live_selection_list_is_not_rejected(self):
+        """A genuine selection whose numbered options continue well past
+        12 lines is a live list, not scrollback (review finding)."""
+        options = [f"  {i}. Option {i}" for i in range(1, 20)]
+        pane = ["Pick a task:"] + ["❯ " + options[0][2:]] + options[1:]
+        result = extract_interactive_content(pane)
+        assert result is not None and result.name == "SelectionUI"

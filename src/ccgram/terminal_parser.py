@@ -28,6 +28,7 @@ class InteractiveUIContent:
 
     content: str  # The extracted display content
     name: str = ""  # Pattern name that matched (e.g. "AskUserQuestion")
+    advisory: bool = False  # structural guess, not a named pattern
 
 
 @dataclass(frozen=True)
@@ -64,7 +65,21 @@ class UIPattern:
     # with the same glyph) sit mid-scrollback above unrelated numbered
     # lists (TASK-47 scrollback incident, 2026-10-01).
     scrollback_guard: bool = False
+    # Structural guess, not a named pattern: consumers show the keyboard
+    # but must not latch blocking interactive mode (TASK-47).
+    advisory: bool = False
 
+
+# Shared bottoms for the structural selection catch-all: the action-hint
+# footer table is reused by the scrollback guard so the two cannot drift.
+_SELECTION_HINT_BOTTOMS = (
+    re.compile(r"^\s*Esc to (cancel|exit)"),
+    re.compile(r"^\s*Enter to (select|confirm|continue)"),
+    re.compile(r"^\s*ctrl-g to edit"),
+    re.compile(r"(?i)^\s*Press enter to (confirm|select|continue|submit)"),
+    re.compile(r"(?i)^\s*enter to (submit|confirm|select)"),
+)
+_SELECTION_NUMBERED_BOTTOM = re.compile(r"^\s+\d+\.\s")
 
 # ── UI pattern definitions (order matters — first match wins) ────────────
 
@@ -137,19 +152,12 @@ UI_PATTERNS: list[UIPattern] = [
         # option text beside the glyph; the idle input box (pyte-padded
         # to full width) must not anchor (TASK-47).
         top=(re.compile(r"^\s*[❯›]\s+\S"),),
-        bottom=(
-            re.compile(r"^\s*Esc to (cancel|exit)"),
-            re.compile(r"^\s*Enter to (select|confirm|continue)"),
-            re.compile(r"^\s*ctrl-g to edit"),
-            re.compile(r"(?i)^\s*Press enter to (confirm|select|continue|submit)"),
-            re.compile(r"(?i)^\s*enter to (submit|confirm|select)"),
-            # Non-selected list items (e.g. /remote-control has no footer)
-            re.compile(r"^\s+\d+\.\s"),
-        ),
+        bottom=(*_SELECTION_HINT_BOTTOMS, _SELECTION_NUMBERED_BOTTOM),
         min_gap=1,
         context_above=10,
         anchor_last=True,
         scrollback_guard=True,
+        advisory=True,
     ),
 ]
 
@@ -204,13 +212,24 @@ def _last_nonempty_from(lines: list[str], top_idx: int) -> int | None:
 def _rejects_scrollback_footer(lines: list[str], bottom_idx: int) -> bool:
     """A numbered-item bottom with no action-hint footer, far from the
     pane's last non-empty line, is scrollback (a user-message echo above
-    an unrelated numbered list), not a live selection footer."""
-    if _ACTION_HINT_RE.search(lines[bottom_idx]):
+    an unrelated numbered list), not a live selection footer. Consecutive
+    numbered items extend the footer: a live list of any length ends at
+    its own tail, so long real selections are not rejected."""
+    if any(p.search(lines[bottom_idx]) for p in _SELECTION_HINT_BOTTOMS):
         return False
-    last_nonempty = len(lines) - 1
-    while last_nonempty > bottom_idx and not lines[last_nonempty].strip():
-        last_nonempty -= 1
-    return last_nonempty - bottom_idx > _SCROLLBACK_GUARD_DISTANCE
+    last = bottom_idx
+    for i in range(bottom_idx, len(lines)):
+        line = lines[i]
+        if not line.strip():
+            continue
+        if _SELECTION_NUMBERED_BOTTOM.search(line):
+            last = i
+        else:
+            break
+    tail = _last_nonempty_from(lines, last)
+    if tail is None:
+        return False
+    return tail - last > _SCROLLBACK_GUARD_DISTANCE
 
 
 def _try_extract(lines: list[str], pattern: UIPattern) -> InteractiveUIContent | None:
@@ -261,7 +280,11 @@ def _try_extract(lines: list[str], pattern: UIPattern) -> InteractiveUIContent |
 
     display_start = _context_start(lines, top_idx, pattern.context_above)
     content = "\n".join(lines[display_start : bottom_idx + 1]).rstrip()
-    return InteractiveUIContent(content=_shorten_separators(content), name=pattern.name)
+    return InteractiveUIContent(
+        content=_shorten_separators(content),
+        name=pattern.name,
+        advisory=pattern.advisory,
+    )
 
 
 # ── Bottom-up fallback ───────────────────────────────────────────────────

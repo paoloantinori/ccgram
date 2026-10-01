@@ -1176,7 +1176,7 @@ class TestAdvisoryCatchAll:
         from ccgram.handlers.interactive import interactive_ui as iui
 
         async def capture(window_id, pane_id=None):
-            return ("SelectionUI", "❯ Option A\n  1. one")
+            return ("SelectionUI", "❯ Option A\n  1. one", True)
 
         sent = SimpleNamespace(message_id=77)
 
@@ -1205,7 +1205,7 @@ class TestAdvisoryCatchAll:
         from ccgram.handlers.interactive import interactive_ui as iui
 
         async def capture(window_id, pane_id=None):
-            return ("AskUserQuestion", "Which option?")
+            return ("AskUserQuestion", "Which option?", False)
 
         sent = SimpleNamespace(message_id=78)
 
@@ -1226,3 +1226,66 @@ class TestAdvisoryCatchAll:
         assert ok is True
         assert get_interactive_window(7, 43, chat_id=-100200) == "@1"
         clear_interactive_mode(7, 43, chat_id=-100200)
+
+
+class TestAdvisoryEditPath:
+    async def _seed(self, iui, monkeypatch, ui_name, advisory):
+        async def capture(window_id, pane_id=None):
+            return (ui_name, "content", advisory)
+
+        sent = SimpleNamespace(message_id=90)
+
+        async def send_with_retry(*args, **kwargs):
+            return sent
+
+        monkeypatch.setattr(iui, "_capture_interactive_content", capture)
+        monkeypatch.setattr(iui, "_send_interactive_with_retry", send_with_retry)
+        monkeypatch.setattr(
+            iui.thread_router, "resolve_chat_id", lambda *a, **k: -100200
+        )
+        return sent
+
+    async def test_advisory_edit_clears_stale_blocking_latch(
+        self, monkeypatch
+    ):
+        from ccgram.handlers.interactive import (
+            clear_interactive_mode,
+            get_interactive_window,
+        )
+        from ccgram.handlers.interactive import interactive_ui as iui
+
+        await self._seed(iui, monkeypatch, "SelectionUI", True)
+        # A stale blocking latch from an earlier, answered prompt.
+        ikey = iui._interactive_key(7, 44, chat_id=-100200)
+        iui._interactive_msgs[ikey] = 89
+        iui._interactive_mode[ikey] = "@1"
+
+        async def edit_ok(*args, **kwargs):
+            return True
+
+        monkeypatch.setattr(iui, "_edit_interactive_msg", edit_ok)
+        clear_interactive_mode(7, 45, chat_id=-100200)
+        ok = await iui.handle_interactive_ui(
+            SimpleNamespace(), 7, "@1", 44, chat_id=-100200
+        )
+        assert ok is True
+        # The advisory edit retired the stale blocking latch.
+        assert get_interactive_window(7, 44, chat_id=-100200) is None
+
+    async def test_blocking_edit_keeps_latch(self, monkeypatch):
+        from ccgram.handlers.interactive import get_interactive_window
+        from ccgram.handlers.interactive import interactive_ui as iui
+
+        await self._seed(iui, monkeypatch, "AskUserQuestion", False)
+        ikey = iui._interactive_key(7, 45, chat_id=-100200)
+        iui._interactive_msgs[ikey] = 91
+
+        async def edit_ok(*args, **kwargs):
+            return True
+
+        monkeypatch.setattr(iui, "_edit_interactive_msg", edit_ok)
+        ok = await iui.handle_interactive_ui(
+            SimpleNamespace(), 7, "@1", 45, chat_id=-100200
+        )
+        assert ok is True
+        assert get_interactive_window(7, 45, chat_id=-100200) == "@1"
