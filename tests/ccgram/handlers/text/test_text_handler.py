@@ -1245,9 +1245,7 @@ class TestAdvisoryEditPath:
         )
         return sent
 
-    async def test_advisory_edit_clears_stale_blocking_latch(
-        self, monkeypatch
-    ):
+    async def test_advisory_edit_clears_stale_blocking_latch(self, monkeypatch):
         from ccgram.handlers.interactive import (
             clear_interactive_mode,
             get_interactive_window,
