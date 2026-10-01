@@ -277,8 +277,6 @@ def _session_composite(record: Mapping[str, object]) -> HerdrSessionComposite | 
     )
 
 
-
-
 def _parse_live_record(record: Mapping[str, object]) -> HerdrLiveRecord | None:
     composite = _session_composite(record)
     locators = {
