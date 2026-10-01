@@ -169,3 +169,16 @@ there is no action-hint footer (scrollback_guard). Real selections sit
 atop their footer; echoes sit mid-history. Verified on the live pane
 capture (now None) plus three regressions. Immediate unblock was a
 Mac bridge restart (the latch is in-memory).
+
+## Structural closure (2026-10-01, "fixa il 47")
+
+The piecemeal fixes (working-agent gate, scrollback guard) each closed
+one source, but the amplifier stayed: ANY catch-all match, including a
+false one, latched the BLOCKING interactive mode, and the dismissal
+loop then rejected all text until a restart. Closed structurally
+(c2239bfe, deployed dev107 both bridges): the catch-all SelectionUI
+keyboard is now ADVISORY (shown and usable, never latches); only a
+named pattern (AskUserQuestion, ExitPlanMode, PermissionPrompt,
+RestoreCheckpoint, Settings, SelectModel) or a transcript tool_use may
+latch blocking mode. A future false catch-all match is at worst a
+cosmetic keyboard; text always flows.
