@@ -49,6 +49,7 @@ from pathlib import Path
 import structlog
 
 from ..herdr_targets import (
+    HerdrSessionComposite,
     canonical_session_bytes,
     herdr_session_target_id,
     is_herdr_session_target,
@@ -234,16 +235,6 @@ class HerdrUnresolvedTargetError(HerdrError):
 
 class HerdrAmbiguousTargetError(HerdrError):
     """More than one current session record matches the requested target ID."""
-
-
-@dataclass(frozen=True)
-class HerdrSessionComposite:
-    """The complete input for an opaque Herdr target identity."""
-
-    source: str
-    agent: str
-    kind: str
-    value: str
 
 
 @dataclass(frozen=True)
