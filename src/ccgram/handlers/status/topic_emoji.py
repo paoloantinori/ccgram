@@ -19,6 +19,7 @@ Key functions:
 """
 
 import asyncio
+import os
 import time
 from weakref import WeakValueDictionary
 
@@ -399,6 +400,15 @@ async def sync_topic_name(
         )
 
 
+def _automatic_renames_enabled() -> bool:
+    """CCGRAM_TOPIC_EMOJI=off silences the automatic title renamer.
+
+    One-shot naming (topic-names extension, /names) then owns titles;
+    the manual /sync repair path stays available either way.
+    """
+    return (os.getenv("CCGRAM_TOPIC_EMOJI", "").strip().lower() or "on") != "off"
+
+
 async def update_topic_emoji(
     client: TelegramClient,
     chat_id: int,
@@ -420,6 +430,8 @@ async def update_topic_emoji(
         display_name: Base topic name (without emoji prefix)
     """
     if chat_id in _disabled_chats:
+        return
+    if not _automatic_renames_enabled():
         return
 
     key = (chat_id, thread_id)
