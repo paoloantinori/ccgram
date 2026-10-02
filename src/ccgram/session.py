@@ -450,8 +450,13 @@ class SessionManager:
     # --- Display name management (delegated to thread_router) ---
 
     def set_display_name(self, window_id: str, window_name: str) -> None:
-        """Update display name for a window_id."""
+        """Update display name for a window_id (an explicit user choice).
+
+        The name is pinned: the periodic listing sync must not revert it
+        to the auto-generated window name.
+        """
         thread_router.set_display_name(window_id, window_name)
+        thread_router.pin_display_name(window_id)
         # Also update WindowState if it exists
         ws = self.window_states.get(window_id)
         if ws:
@@ -465,6 +470,8 @@ class SessionManager:
         # persisted state.
         ws_changed = False
         for window_id, window_name in live_windows:
+            if window_id in thread_router.window_display_pins:
+                continue
             ws = self.window_states.get(window_id)
             if ws and ws.window_name != window_name:
                 ws.window_name = window_name

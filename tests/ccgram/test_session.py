@@ -2018,3 +2018,15 @@ class TestDurableSessionAliases:
         monkeypatch.setattr(session_mod, "parse_session_map", fake_parse)
         mgr = self._manager()
         assert mgr._durable_session_aliases({"any"}) == {}
+
+
+class TestDisplayNamePinAcrossSync:
+    def test_user_rename_survives_listing_sync(self, mgr) -> None:
+        mgr.set_display_name("@1", "user choice")
+        changed = mgr.sync_display_names([("@1", "auto prefix")])
+        assert not changed
+        # The pinned name survives BOTH the router sync and the
+        # WindowState reconcile inside SessionManager.sync_display_names.
+        from ccgram.thread_router import thread_router
+
+        assert thread_router.get_display_name("@1") == "user choice"
