@@ -43,3 +43,10 @@ default, unknown); provider_topic_name for zai; strip of the legacy
 prefix; manual-override precedence. Live check: one zai window's topic
 becomes "Zai · <name>" on the bird chat after the next state transition,
 and the plain-claude windows (if any) stay "Claude · ".
+
+## Status
+
+Done 2026-10-02, commit c22317e3: variant promotion at provider_topic_name,
+deployed to the Mac bridge (uv tool reinstall + service restart, verified
+new code in site-packages and new pid). Topics converge on the next state
+transition per window.
