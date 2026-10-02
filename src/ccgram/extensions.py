@@ -70,6 +70,11 @@ def load_extensions(add_handler: Callable[[BaseHandler], None]) -> int:
             logger.info("extension loaded: %s", ep.name)
         except Exception:  # noqa: BLE001  # one bad package never blocks boot
             logger.exception("extension failed to load: %s", ep.name)
+    if count == 0:
+        logger.warning(
+            "no extensions loaded: a plain install dropped ccgram-ext; "
+            "deploy with `uv tool install . --force --with <ccgram-ext path>`"
+        )
     return count
 
 
