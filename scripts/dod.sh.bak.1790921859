@@ -23,10 +23,10 @@ set -e
 # issued over a 2-failed run).
 
 echo "== mechanical battery =="
-uv run --extra dev --extra tts python -m pytest tests/ccgram -q
+uv run --extra dev python -m pytest tests/ccgram -q
 make lint
-PYRIGHT_PYTHON_FORCE_VERSION=latest uv run --extra dev --extra tts pyright src/ccgram
-uv run --extra dev --extra tts ruff format --check src/ccgram tests/ccgram
+PYRIGHT_PYTHON_FORCE_VERSION=latest uv run --extra dev pyright src/ccgram
+uv run --extra dev ruff format --check src/ccgram tests/ccgram
 echo "== mechanical battery: green =="
 
 if [ "$REVIEWED" -ne 1 ]; then
