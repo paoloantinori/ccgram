@@ -181,7 +181,14 @@ def _resolve_topic_name(key: tuple[int, int], display_name: str) -> tuple[str, b
     clean = strip_emoji_prefix(display_name)
     window_id = thread_router.get_window_for_chat_thread(*key)
     provider = identity_state.get_provider_name(window_id) if window_id else ""
-    clean = provider_topic_name(clean, provider or "")
+    # A manually chosen provider keeps authoritative naming; otherwise the
+    # transcript root promotes tracked-claude zai windows to their variant.
+    transcript = (
+        ""
+        if not window_id or identity_state.is_provider_manually_overridden(window_id)
+        else identity_state.get_transcript_path(window_id)
+    )
+    clean = provider_topic_name(clean, provider or "", transcript)
     return clean, _topic_names.get(key) != clean
 
 
