@@ -155,59 +155,56 @@ class TestErrorHandlerStaleCallback:
 
 class TestShutdownExitWatchdog:
     async def test_post_stop_arms_and_post_shutdown_cancels(self) -> None:
-        from ccgram.bot import (
-            _SHUTDOWN_EXIT_WATCHDOG_S,
-            _hard_exit_if_shutdown_wedged,
-            post_shutdown,
-            post_stop,
-        )
+        # The v4.13 watchdog is armed via arm_shutdown_watchdog() from
+        # post_stop (the common funnel) and disarmed in post_shutdown.
+        from ccgram import bot
+        from ccgram.bot import post_shutdown, post_stop
 
-        fake_monitor = MagicMock()
+        bot._shutdown_watchdog = None
         timer = MagicMock()
         app = MagicMock()
         with (
             patch("ccgram.bot.threading.Timer", return_value=timer) as timer_cls,
-            patch(
-                "ccgram.session_monitor.get_active_monitor",
-                return_value=fake_monitor,
-            ),
             patch("ccgram.bot.bootstrap.stop_delivery_runtime", new=AsyncMock()),
             patch("ccgram.bot._send_shutdown_notification", new=AsyncMock()) as goodbye,
             patch("ccgram.bot.bootstrap.shutdown_runtime", new=AsyncMock()),
         ):
             await post_stop(app)
             timer_cls.assert_called_once_with(
-                _SHUTDOWN_EXIT_WATCHDOG_S,
-                _hard_exit_if_shutdown_wedged,
-                args=(fake_monitor,),
+                bot._SHUTDOWN_WATCHDOG_SECONDS,
+                bot._force_exit_after_wedged_shutdown,
             )
             assert timer.daemon is True
             timer.start.assert_called_once()
             goodbye.assert_awaited_once()
+            assert bot._shutdown_watchdog is timer
 
             await post_shutdown(app)
         timer.cancel.assert_called_once()
+        assert bot._shutdown_watchdog is None
 
-    async def test_hard_exit_saves_captured_monitor_and_exits(self) -> None:
-        from ccgram.bot import _hard_exit_if_shutdown_wedged
+    async def test_forced_exit_runs_bounded_flush_and_exits(self) -> None:
+        from ccgram.bot import _force_exit_after_wedged_shutdown
 
-        fake_monitor = MagicMock()
         with (
             patch("ccgram.bot.os._exit") as exit_mock,
-            patch("ccgram.bot.sys.stdout") as stdout,
+            patch("ccgram.bot.threading.Thread") as thread_cls,
         ):
-            _hard_exit_if_shutdown_wedged(fake_monitor)
+            _force_exit_after_wedged_shutdown()
         exit_mock.assert_called_once_with(1)
-        fake_monitor.state.save.assert_called_once()
-        assert stdout.flush.called
+        from ccgram.bot import _WATCHDOG_FLUSH_SECONDS
 
-        exit_mock.reset_mock()
-        with patch("ccgram.bot.os._exit") as exit_mock:
-            _hard_exit_if_shutdown_wedged(None)
-        exit_mock.assert_called_once_with(1)
+        thread_cls.assert_called_once_with(
+            target=thread_cls.call_args.kwargs["target"], daemon=True
+        )
+        flusher = thread_cls.return_value
+        flusher.start.assert_called_once()
+        flusher.join.assert_called_once_with(timeout=_WATCHDOG_FLUSH_SECONDS)
 
-    async def test_conflict_stop_does_not_arm_the_watchdog(self) -> None:
-        # Arming lives in post_stop, the common funnel of every shutdown.
+    async def test_conflict_stop_arms_the_watchdog_too(self) -> None:
+        # The conflict stop path never reaches the signal handler, so
+        # the watchdog is armed right there (b0f01ed0): a wedge in
+        # stop() must not leave the supervisor waiting.
         ctx = _make_context(Conflict("409 Conflict"))
         with (
             patch("ccgram.bot.threading.Timer") as timer_cls,
@@ -216,7 +213,7 @@ class TestShutdownExitWatchdog:
             await _error_handler(None, ctx)
             await _error_handler(None, ctx)
         ctx.application.stop_running.assert_called_once()
-        timer_cls.assert_not_called()
+        timer_cls.assert_called_once()
 
 
 class TestShutdownNotification:
