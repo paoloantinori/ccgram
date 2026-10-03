@@ -34,5 +34,8 @@ notification with a path starting at `/`.
 
 ## Status
 
-Done 2026-10-03, commit ff4c8980 (amended with review fixes): deployed
-to bird and Mac via ccgram-bridge-deploy.sh.
+Done 2026-10-03, commit f9e25b91: deployed to bird and Mac via
+ccgram-bridge-deploy.sh. Upstream contribution opened as
+alexei-led/ccgram#296 (branch upload-absolute-path, commit ea617f83,
+two code-review high rounds, e2e failures proven pre-existing on the
+clean base).
