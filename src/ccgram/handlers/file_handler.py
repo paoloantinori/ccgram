@@ -1,7 +1,7 @@
 """Photo and document message handlers for forwarding files to Claude Code.
 
 Saves uploaded files to `.ccgram-uploads/` in the session's cwd, then sends
-Claude a natural-language message with the relative path so it can read the
+Claude a natural-language message with the absolute path so it can read the
 file via its Read tool.
 
 Key handlers:
@@ -236,7 +236,10 @@ async def _upload_and_notify(
 
     rel_path = f"{_UPLOAD_DIR}/{saved_name}"
     caption = message.caption or ""
-    claude_msg = claude_msg_tpl.format(name=saved_name, path=rel_path)
+    # Absolute path in the agent message: a relative one gets resolved against
+    # the wrong base (home instead of the session cwd) and the failed Read
+    # reads as "the upload never happened" (incident 2026-10-03).
+    claude_msg = claude_msg_tpl.format(name=saved_name, path=upload_path / saved_name)
     if caption:
         claude_msg += f"\n\nUser note: {_sanitize_caption(caption)}"
 

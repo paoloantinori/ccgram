@@ -227,3 +227,44 @@ class TestUploadTypingFailure:
             )
 
         mock_send.assert_awaited_once()
+
+
+class TestUploadNotifiesAbsolutePath:
+    async def test_agent_message_uses_absolute_path(self, tmp_path: Path) -> None:
+        """The agent message must carry an absolute path: a relative one gets
+        resolved against the wrong base (home instead of the session cwd) and
+        the failed Read reads as "the upload never happened" (2026-10-03).
+        """
+        message = MagicMock()
+        message.caption = None
+        message.chat.id = -100
+        message.chat.send_action = AsyncMock()
+
+        with (
+            patch.object(
+                file_handler,
+                "_resolve_upload_dir",
+                return_value=("@0", tmp_path, None),
+            ),
+            patch.object(
+                file_handler,
+                "_download_and_save",
+                new_callable=AsyncMock,
+                return_value="a.txt",
+            ),
+            patch.object(
+                file_handler,
+                "send_telegram_to_window",
+                new_callable=AsyncMock,
+                return_value=(True, "ok"),
+            ) as mock_send,
+            patch.object(file_handler, "ack_reaction", new_callable=AsyncMock),
+            patch.object(file_handler, "safe_reply", new_callable=AsyncMock),
+        ):
+            await file_handler._upload_and_notify(
+                message, 1, 42, "a.txt", "fid", 10, "File", "see {path}", "📎"
+            )
+
+        assert mock_send.await_args is not None
+        agent_message = mock_send.await_args.args[3]
+        assert str(tmp_path / "a.txt") in agent_message
