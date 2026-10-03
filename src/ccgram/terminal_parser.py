@@ -80,6 +80,13 @@ _SELECTION_HINT_BOTTOMS = (
     re.compile(r"(?i)^\s*enter to (submit|confirm|select)"),
 )
 _SELECTION_NUMBERED_BOTTOM = re.compile(r"^\s+\d+\.\s")
+# A numbered-item bottom without an action-hint footer is only trusted
+# when the numbered option sits on the very next line under the cursor:
+# live menus render options as a contiguous block starting at the
+# cursor, while transcript echoes (user-message renders reuse the
+# cursor glyph) are separated from later numbered replies by at least
+# the blank line Claude Code draws between turns (gap >= 2).
+_NUMBERED_OPTION_CONTIGUITY = 1
 
 # ── UI pattern definitions (order matters — first match wins) ────────────
 
@@ -209,27 +216,21 @@ def _last_nonempty_from(lines: list[str], top_idx: int) -> int | None:
     return None
 
 
-def _rejects_scrollback_footer(lines: list[str], bottom_idx: int) -> bool:
-    """A numbered-item bottom with no action-hint footer, far from the
-    pane's last non-empty line, is scrollback (a user-message echo above
-    an unrelated numbered list), not a live selection footer. Consecutive
-    numbered items extend the footer: a live list of any length ends at
-    its own tail, so long real selections are not rejected."""
+def _rejects_scrollback_footer(lines: list[str], top_idx: int, bottom_idx: int) -> bool:
+    """Whether a numbered-item bottom is scrollback, not a live footer.
+
+    Without an action-hint footer, a numbered bottom is only trusted
+    when the cursor line sits directly above it (within
+    ``_NUMBERED_OPTION_CONTIGUITY`` lines): live menus render the
+    selected option immediately under the cursor, at any list length
+    and any pane depth, while transcript echoes (user messages render
+    with the same glyph) sit arbitrary distances above unrelated
+    numbered replies (TASK-47 scrollback incident, 2026-10-01; prose
+    and numbered echo variants, 2026-10-03).
+    """
     if any(p.search(lines[bottom_idx]) for p in _SELECTION_HINT_BOTTOMS):
         return False
-    last = bottom_idx
-    for i in range(bottom_idx, len(lines)):
-        line = lines[i]
-        if not line.strip():
-            continue
-        if _SELECTION_NUMBERED_BOTTOM.search(line):
-            last = i
-        else:
-            break
-    tail = _last_nonempty_from(lines, last)
-    if tail is None:
-        return False
-    return tail - last > _SCROLLBACK_GUARD_DISTANCE
+    return bottom_idx - top_idx > _NUMBERED_OPTION_CONTIGUITY
 
 
 def _try_extract(lines: list[str], pattern: UIPattern) -> InteractiveUIContent | None:
@@ -275,7 +276,9 @@ def _try_extract(lines: list[str], pattern: UIPattern) -> InteractiveUIContent |
     if bottom_idx is None or bottom_idx - top_idx < pattern.min_gap:
         return None
 
-    if pattern.scrollback_guard and _rejects_scrollback_footer(lines, bottom_idx):
+    if pattern.scrollback_guard and _rejects_scrollback_footer(
+        lines, top_idx, bottom_idx
+    ):
         return None
 
     display_start = _context_start(lines, top_idx, pattern.context_above)
