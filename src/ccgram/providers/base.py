@@ -87,7 +87,7 @@ class StatusUpdate:
     # True when the detection is a structural guess (the catch-all
     # selection shape) rather than a named pattern or action-hint
     # anchor: the keyboard may be shown, but it must not latch the
-    # blocking interactive mode (TASK-47).
+    # blocking interactive mode.
     ui_advisory: bool = False
 
 

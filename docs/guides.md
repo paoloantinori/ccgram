@@ -243,6 +243,7 @@ All settings accept both CLI flags and environment variables. CLI flags take pre
 | `CCGRAM_STATUS_POLL_INTERVAL`                         | `1.0`                          | Status polling interval in seconds (min 0.5)                                                         |
 | `CCGRAM_YOLO_CONFIRMATION_TIMEOUT`                    | `30.0`                         | Seconds to wait for the YOLO confirmation prompt (min 1.0)                                           |
 | `CCGRAM_SKIP_BARRIER_DEADLINE_S`                      | `600`                          | Seconds a pending backlog-skip barrier waits for its notice before force-completion (min 60)         |
+| `CCGRAM_DELIVERY_WATCH_GAP_KB`                        | `256`                          | KB of undelivered transcript output before the delivery-wedge watch alerts; `0` disables it          |
 | `CCGRAM_MINIAPP_BASE_URL`                             | _(disabled)_                   | Externally reachable HTTPS URL for the Mini App dashboard                                            |
 | `CCGRAM_MINIAPP_HOST`                                 | `127.0.0.1`                    | Local bind host for the Mini App aiohttp server                                                      |
 | `CCGRAM_MINIAPP_PORT`                                 | `8765`                         | Local bind port for the Mini App aiohttp server                                                      |
@@ -722,6 +723,10 @@ ccgram retries brief Telegram polling conflicts for up to 90 seconds, which can
 occur after a network reconnect. Persistent conflicts stop with a non-zero exit
 so `Restart=on-failure` restarts the service. Check for another bot process that
 uses the same token if the conflict returns.
+
+A graceful shutdown that wedges (for example a stuck update queue) is
+exit-forced after 600 seconds with the stop's own exit code, so
+`Restart=on-failure` cannot be blocked forever by a half-stopped process.
 
 On macOS, you can use a launchd plist or simply run in a detached tmux session:
 

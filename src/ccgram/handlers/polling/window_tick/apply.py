@@ -289,7 +289,7 @@ async def _check_interactive_only(
     if status is not None and status.is_interactive:
         # Advisory detections never pre-latch blocking mode: the latch
         # decision belongs to handle_interactive_ui (named pattern or
-        # transcript tool_use only; TASK-47).
+        # transcript tool_use only).
         if not status.ui_advisory:
             set_interactive_mode(user_id, window_id, thread_id)
         handled = await handle_interactive_ui(

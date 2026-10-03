@@ -31,7 +31,6 @@ from ...telegram_client import TelegramClient
 from ...window_query import get_window_provider
 from ...thread_router import thread_router
 from ...multiplexer import multiplexer as tmux_manager
-from ...multiplexer.agent_status_cache import resolve_agent_working
 from ...topic_state_registry import topic_state
 from ..callback_data import (
     CB_ASK_CHOICE,
@@ -186,6 +185,23 @@ def get_interactive_pane(
     return _interactive_panes.get(_interactive_key(user_id, thread_id, chat_id))
 
 
+def _record_interactive_pane(ikey: InteractiveKey, pane_id: str | None) -> None:
+    """Remember the pane owning the topic's live prompt.
+
+    A window-level detection (``None``) means the active pane, which is
+    also where forwarded text lands, so it must not be replaced by a
+    sibling pane's prompt: dismissal would then target the sibling while
+    the text reaches the still-interactive active pane. A later
+    window-level detection does replace a sibling owner.
+    """
+    if (
+        pane_id is None
+        or ikey not in _interactive_panes
+        or _interactive_panes[ikey] is not None
+    ):
+        _interactive_panes[ikey] = pane_id
+
+
 def set_interactive_mode(
     user_id: int,
     window_id: str,
@@ -209,7 +225,7 @@ def set_interactive_mode(
     )
     ikey = _interactive_key(user_id, thread_id, chat_id)
     _interactive_mode[ikey] = window_id
-    _interactive_panes[ikey] = pane_id
+    _record_interactive_pane(ikey, pane_id)
 
 
 def clear_interactive_mode(
@@ -359,9 +375,9 @@ def is_current_interactive_prompt(
     ikey = _interactive_key(user_id, thread_id, chat_id)
     if _interactive_msgs.get(ikey) != message_id:
         return False
-    # The currently shown keyboard is answerable even when it is
-    # advisory (a true-positive structural guess such as
-    # /remote-control): blocking mode gates text forwarding, not taps.
+    # The currently shown keyboard is answerable even when advisory (a
+    # true-positive structural guess such as /remote-control): blocking
+    # mode gates text forwarding, not taps.
     if _interactive_mode.get(ikey) == window_id:
         blocking_prompt = True
     else:
@@ -498,9 +514,7 @@ async def _capture_interactive_content(
     When *pane_id* is given, captures that specific pane (by stable ``%N`` ID)
     instead of the window's active pane.
 
-    Returns (ui_name, text, advisory) if an interactive UI is detected,
-    None otherwise; advisory marks a structural guess that must not
-    latch the blocking interactive mode (TASK-47).
+    Returns (ui_name, text) if an interactive UI is detected, None otherwise.
     """
     if pane_id:
         pane_text = await tmux_manager.capture_pane_by_id(pane_id, window_id=window_id)
@@ -614,13 +628,6 @@ async def pane_has_interactive_prompt(
     gone" (a modal may still be open and would eat the forwarded text
     as an answer).
     """
-    if await resolve_agent_working(window_id):
-        # TASK-47: never confirm against a working pane; Claude Code's
-        # queued-input block reads as a prompt to the scraper, the
-        # Escape would never confirm, and every text retry gets
-        # rejected. A working agent has no prompt.
-        return False
-
     if pane_id:
         pane_text = await tmux_manager.capture_pane_by_id(pane_id, window_id=window_id)
     else:
@@ -664,6 +671,11 @@ async def handle_interactive_ui(
         return False
 
     ui_name, content, advisory = captured
+    # Advisory detections (structural guesses) show the keyboard but
+    # never latch blocking interactive mode: only a named pattern or a
+    # transcript tool_use may block. Advisory sends also retire any
+    # stale blocking latch from an earlier prompt.
+    blocking = not advisory
     pane_name = _lookup_pane_name(window_id, pane_id) if pane_id else None
     text = format_interactive_message(content, pane_id=pane_id, pane_name=pane_name)
     resolved_chat_id = (
@@ -681,26 +693,17 @@ async def handle_interactive_ui(
         sequence=sequence,
     )
 
-    # Advisory detections (structural guesses) show the keyboard but
-    # never latch blocking interactive mode: only a named pattern or a
-    # transcript tool_use may block. Advisory sends also retire any
-    # stale blocking latch from an earlier prompt, so a false match
-    # cannot keep a dead latch alive (TASK-47).
-    blocking = not advisory
-
     # Try editing existing interactive message first
     existing_msg_id = _interactive_msgs.get(ikey)
     if existing_msg_id:
         edited = await _edit_interactive_msg(
             client, resolved_chat_id, existing_msg_id, text, keyboard
         )
+        if edited and not blocking:
+            _interactive_mode.pop(ikey, None)
         if edited:
             _interactive_contexts[ikey] = (resolved_chat_id, existing_msg_id)
-            _interactive_panes[ikey] = pane_id
-            if blocking:
-                _interactive_mode[ikey] = window_id
-            else:
-                _interactive_mode.pop(ikey, None)
+            _record_interactive_pane(ikey, pane_id)
         return edited or False
 
     # Cooldown: prevent rapid retries when sends fail
@@ -733,12 +736,9 @@ async def handle_interactive_ui(
     )
     if sent:
         _interactive_msgs[ikey] = sent.message_id
-        _interactive_panes[ikey] = pane_id
+        _record_interactive_pane(ikey, pane_id)
         _interactive_contexts[ikey] = (resolved_chat_id, sent.message_id)
-        if blocking:
-            _interactive_mode[ikey] = window_id
-        else:
-            _interactive_mode.pop(ikey, None)
+        _interactive_mode[ikey] = window_id
         _send_cooldowns.pop(ikey, None)
     return sent is not None
 
@@ -759,6 +759,7 @@ async def clear_interactive_msg(
     ikey = _interactive_key(user_id, thread_id, resolved_chat_id)
     msg_id = _interactive_msgs.pop(ikey, None)
     _interactive_mode.pop(ikey, None)
+    _interactive_panes.pop(ikey, None)
     _interactive_contexts.pop(ikey, None)
     _interactive_sequences.pop(ikey, None)
     _interactive_contents.pop(ikey, None)

@@ -581,11 +581,16 @@ async def _forward_message(
 
     # If in interactive mode, the terminal likely has a modal prompt
     # (AskUserQuestion / ExitPlanMode) that would swallow plain text or
-    # treat it as an answer. Dismiss it with Escape FIRST, then deliver
-    # the text to the agent's input line: the operator's words must
-    # reach the agent either way, never be discarded (2026-09-24: the
-    # discard variant trapped voice-transcript users in a dismissal
-    # loop while their agent sat on an unanswered question).
+    # treat it as an answer. Dismiss it, CONFIRM the dismissal by
+    # re-reading the owning pane with the poller's own detector, and
+    # only then deliver the text. A fixed sleep is not confirmation:
+    # on a failed Escape send, an exception, or a prompt that never
+    # goes away, the interactive tracking stays, the text is NOT
+    # forwarded, and the notice echoes the text back so it is never
+    # lost (2026-09-24: silently discarding trapped voice-transcript
+    # users in a dismissal loop; 2026-09-25 review: silently
+    # FORWARDING after an unconfirmed dismissal is the same bug
+    # mirrored).
     interactive_window = get_interactive_window(
         user_id, thread_id, chat_id=message.chat.id
     )

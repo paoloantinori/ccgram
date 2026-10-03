@@ -18,17 +18,16 @@ because receipts stop settling.
 """
 
 import asyncio
-import os
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
 import structlog
 
+from ...config import config
 from ...session_query import iter_bound_topics
 from ...session_state_ports import get_delivery_watermark
 from ...telegram_client import TelegramClient
-from ...telegram_rate_limiter import interactive_priority
 from ..messaging_pipeline.message_sender import safe_send
 
 logger = structlog.get_logger()
@@ -37,11 +36,9 @@ logger = structlog.get_logger()
 # wedge candidate; below this a stalled watermark is normal quiet time.
 # Generous on purpose: a long streaming thinking block grows the
 # transcript without any complete message settling a receipt, and that
-# benign burst must not page the operator. CCGRAM_DELIVERY_WATCH_GAP_KB=0
-# disables the watch (same knob shape as CCGRAM_REPLAY_CAP_MB).
-GAP_THRESHOLD_BYTES = max(
-    0, int(float(os.getenv("CCGRAM_DELIVERY_WATCH_GAP_KB", "256") or 0) * 1024)
-)
+# benign burst must not page the operator. Sourced from
+# CCGRAM_DELIVERY_WATCH_GAP_KB, where 0 disables the watch.
+GAP_THRESHOLD_BYTES = config.delivery_watch_gap_bytes
 # How long a qualifying gap must stay frozen before the alarm fires.
 # The check rides the 60s periodic gate, so this is five to six
 # observations, not a timer.
@@ -201,9 +198,8 @@ async def check_delivery_wedges(client: TelegramClient) -> None:
             # mapping; retry once the router knows the topic's chat.
             _watch.disarm(window_id)
             continue
-        # Direct interactive-path send, decoupled from the poll loop:
-        # the delivery queue is the thing under suspicion and must not
-        # carry its own alarm, and the cycle must not wait on Telegram.
+        # Fire-and-forget send, decoupled from the poll loop: the cycle
+        # must not wait on Telegram.
         task = asyncio.create_task(
             _send_alert(client, chat_id, thread_id, gap, window_id)
         )
@@ -219,15 +215,19 @@ async def _send_alert(
     window_id: str,
 ) -> None:
     try:
-        # safe_send returns None on non-rate-limit Telegram failures (only
+        # Direct send, never the delivery queue: the queue is the thing
+        # under suspicion and must not carry its own alarm. safe_send
+        # returns None on non-rate-limit Telegram failures (only
         # RetryAfter raises), so a None answer is also a failed alert.
-        with interactive_priority():
-            sent = await safe_send(
-                client,
-                chat_id,
-                ALERT_TEXT.format(gap_kb=gap / 1024, stuck=_watch.stuck_grace_s),
-                message_thread_id=thread_id,
-            )
+        # An alert that times out after delivery is retried and can be
+        # posted twice: the duplicate is the accepted side of the
+        # retry-on-any-unconfirmed-send trade-off.
+        sent = await safe_send(
+            client,
+            chat_id,
+            ALERT_TEXT.format(gap_kb=gap / 1024, stuck=_watch.stuck_grace_s),
+            message_thread_id=thread_id,
+        )
         if sent is None:
             raise RuntimeError("alert send returned None")
     except Exception:
