@@ -46,16 +46,36 @@ _COMMAND_ERROR_RE = re.compile(
 )
 
 
-def _extract_probe_error_line(text: str) -> str | None:
+def _extract_probe_error_line(text: str, command: str | None = None) -> str | None:
+    """First command-error line in *text* that names *command*, if given.
+
+    The pane fallback diffs whole terminal captures, and a TUI redraw
+    (skill expansion, spinner) breaks the line-overlap heuristic, so the
+    delta can include scrollback. An error line that does not mention
+    the dispatched command is a STALE error from an earlier attempt and
+    must not fail the current one (2026-10-04: a successful
+    /pa:research was reported failed off the leftover "Unknown command:
+    /names" line).
+    """
+    stem = _command_stem(command)
     for raw_line in text.splitlines():
         line = raw_line.strip()
         if not line:
             continue
-        if _COMMAND_ERROR_RE.search(line):
-            return line
-        if "error" in line.lower() and "command" in line.lower():
+        if _COMMAND_ERROR_RE.search(line) or (
+            "error" in line.lower() and "command" in line.lower()
+        ):
+            if stem and stem.lower() not in line.lower():
+                continue
             return line
     return None
+
+
+def _command_stem(command: str | None) -> str:
+    """The bare command token ("/pa:research args" -> "pa:research")."""
+    if not command:
+        return ""
+    return command.strip().split()[0].lstrip("/")
 
 
 def _extract_pane_delta(before: str | None, after: str | None) -> str:
@@ -108,6 +128,7 @@ async def _probe_transcript_command_error(
     provider: AgentProvider,
     transcript_path: str | None,
     since_offset: int | None,
+    command: str | None = None,
 ) -> str | None:
     """Return first command-like error line found in transcript delta."""
     if not transcript_path or since_offset is None:
@@ -143,7 +164,7 @@ async def _probe_transcript_command_error(
     for msg in messages:
         if msg.role != "assistant":
             continue
-        found = _extract_probe_error_line(msg.text)
+        found = _extract_probe_error_line(msg.text, command)
         if found:
             return found
     return None
@@ -167,11 +188,12 @@ async def _maybe_send_command_failure_message(
         provider,
         transcript_path,
         since_offset,
+        command=cc_slash,
     )
     if not error_line:
         pane_after = await tmux_manager.capture_pane(window_id)
         pane_delta = _extract_pane_delta(pane_before, pane_after)
-        error_line = _extract_probe_error_line(pane_delta)
+        error_line = _extract_probe_error_line(pane_delta, cc_slash)
     if error_line:
         await safe_reply(
             message,

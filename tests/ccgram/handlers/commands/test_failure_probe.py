@@ -193,3 +193,25 @@ class TestMaybeSendCommandFailureMessage:
             )
 
         mock_reply.assert_not_called()
+
+
+class TestStaleErrorFilter:
+    def test_error_line_for_a_different_command_is_ignored(self):
+        from ccgram.handlers.commands.failure_probe import _extract_probe_error_line
+
+        delta = "● Unknown command: /names. Did you mean /name?"
+        assert _extract_probe_error_line(delta, "/pa:research") is None
+
+    def test_error_line_naming_the_command_is_returned(self):
+        from ccgram.handlers.commands.failure_probe import _extract_probe_error_line
+
+        delta = "● Unknown command: /pa:search. Did you mean /pa:research?"
+        assert (
+            _extract_probe_error_line(delta, "/pa:search")
+            == "● Unknown command: /pa:search. Did you mean /pa:research?"
+        )
+
+    def test_no_command_context_keeps_legacy_behavior(self):
+        from ccgram.handlers.commands.failure_probe import _extract_probe_error_line
+
+        assert _extract_probe_error_line("Error: command not found: git") is not None
