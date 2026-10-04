@@ -102,7 +102,8 @@ async def resolve_agent_status(window_id: str) -> AgentStatus | None:
         # A push landed while the probe ran: it is newer, keep it.
         _, newer = _cache.get(window_id, (-1.0, None))
         return newer
-    set_status(window_id, status)
+    if status is not None:
+        set_status(window_id, status)
     return status
 
 
