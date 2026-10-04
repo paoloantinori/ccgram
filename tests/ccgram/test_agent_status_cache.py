@@ -16,22 +16,24 @@ def _empty_cache():
 
 
 def test_cold_window_has_no_status() -> None:
-    assert agent_status_cache._fresh_status("w2:t1") is None
+    assert agent_status_cache._fresh_status("w2:t1") == (False, None)
 
 
 def test_set_status_is_readable_and_scoped_to_its_window() -> None:
     working = AgentStatus("working", "codex", "compiling")
     agent_status_cache.set_status("w2:t1", working)
 
-    assert agent_status_cache._fresh_status("w2:t1") == working
-    assert agent_status_cache._fresh_status("w3:t1") is None
+    fresh, status = agent_status_cache._fresh_status("w2:t1")
+    assert fresh is True and status == working
+    assert agent_status_cache._fresh_status("w3:t1") == (False, None)
 
 
 def test_set_status_overwrites_the_previous_value() -> None:
     agent_status_cache.set_status("w2:t1", AgentStatus("working"))
     agent_status_cache.set_status("w2:t1", AgentStatus("idle"))
 
-    assert agent_status_cache._fresh_status("w2:t1") == AgentStatus("idle")
+    fresh, status = agent_status_cache._fresh_status("w2:t1")
+    assert fresh is True and status == AgentStatus("idle")
 
 
 def test_clear_drops_only_the_named_window() -> None:
@@ -40,8 +42,9 @@ def test_clear_drops_only_the_named_window() -> None:
 
     agent_status_cache.clear("w2:t1")
 
-    assert agent_status_cache._fresh_status("w2:t1") is None
-    assert agent_status_cache._fresh_status("w3:t1") == AgentStatus("idle")
+    assert agent_status_cache._fresh_status("w2:t1") == (False, None)
+    fresh, status = agent_status_cache._fresh_status("w3:t1")
+    assert fresh is True and status == AgentStatus("idle")
 
 
 def test_clear_of_a_cold_window_is_a_no_op() -> None:
@@ -54,8 +57,8 @@ def test_reset_empties_the_whole_cache() -> None:
 
     agent_status_cache.reset()
 
-    assert agent_status_cache._fresh_status("a") is None
-    assert agent_status_cache._fresh_status("b") is None
+    assert agent_status_cache._fresh_status("a") == (False, None)
+    assert agent_status_cache._fresh_status("b") == (False, None)
 
 
 class TestResolveAgentWorking:

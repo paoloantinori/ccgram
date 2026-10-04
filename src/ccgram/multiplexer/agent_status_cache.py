@@ -56,20 +56,22 @@ def reset() -> None:
     _cache.clear()
 
 
-def _fresh_status(window_id: str) -> AgentStatus | None:
-    """The cached answer when fresh, else None (cold, stale, or expired).
+def _fresh_status(window_id: str) -> tuple[bool, AgentStatus | None]:
+    """(fresh, answer) for the cached entry.
 
-    A None answer (probe said no status) is remembered with a shorter
-    negative TTL; a real status uses the full TTL.
+    fresh is True when the entry exists and is inside its TTL (the full
+    TTL for a real status, the shorter negative TTL for a None probe
+    answer). A fresh None is a VALID answer: the backend was just asked
+    and said "no status", so callers must not re-probe.
     """
     entry = _cache.get(window_id)
     if entry is None:
-        return None
+        return False, None
     stamp, status = entry
     ttl = _NEGATIVE_TTL_S if status is None else _STATUS_TTL_S
     if time.monotonic() - stamp > ttl:
-        return None
-    return status
+        return False, None
+    return True, status
 
 
 async def resolve_agent_status(window_id: str) -> AgentStatus | None:
@@ -82,9 +84,9 @@ async def resolve_agent_status(window_id: str) -> AgentStatus | None:
     resolution inside the TTL is a dict hit. Backends without native
     status (tmux) answer None. A failed probe never breaks the caller.
     """
-    status = _fresh_status(window_id)
-    if status is not None:
-        return status
+    fresh, cached = _fresh_status(window_id)
+    if fresh:
+        return cached
     # Ordering guard: a push landing during the probe is newer than the
     # probe's snapshot; writing the probe result back would clobber it and,
     # because pushes are change-only, nothing would correct it until the TTL
@@ -94,13 +96,13 @@ async def resolve_agent_status(window_id: str) -> AgentStatus | None:
         status = await multiplexer.agent_status(window_id)
     except Exception:  # noqa: BLE001  # a failed probe must not break ticks
         logger.debug("agent_status probe failed", window_id=window_id)
-        status = None
-    if stamp_before != _cache.get(window_id, (-1.0, None))[0]:
-        return status
-    if status is not None:
-        set_status(window_id, status)
-    else:
-        _cache[window_id] = (time.monotonic(), None)
+        return cached
+    stamp_after = _cache.get(window_id, (-1.0, None))[0]
+    if stamp_after != stamp_before:
+        # A push landed while the probe ran: it is newer, keep it.
+        _, newer = _cache.get(window_id, (-1.0, None))
+        return newer
+    set_status(window_id, status)
     return status
 
 
