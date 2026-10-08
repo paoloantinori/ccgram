@@ -435,11 +435,19 @@ Creating sessions from the terminal on herdr is covered in [Creating Sessions fr
 
 `/sync` immediately deletes locally known topics whose terminal sessions are confirmed gone, retries pending deletions, and includes locally recorded topics that earlier versions closed without deleting. No extra **Fix** click is needed for this cleanup. It then reports the result and offers **Fix** for other repairable items. Each cleanup batch attempts up to 100 retired topics. Pending deletion records survive restarts and are never dropped by the separate 100-entry retained-history limit.
 
+`/sync` does not scan active Telegram topics or send temporary probe messages. Its audit uses local bindings and authoritative terminal presence, so a successful audit does not prove that every bound topic still exists in Telegram. Deleted-topic detection remains in normal bot operations and lifecycle checks. **Fix** can still repair topic titles and adopt known unbound windows.
+
 Before each removal, CCGram rechecks the exact chat/topic binding. A topic that is active or was rebound in the meantime is protected from deletion. A new binding for the same chat/topic also removes the old retired record. If the multiplexer cannot provide an authoritative listing, `/sync` performs no cleanup.
 
 `CCGRAM_AUTODELETE_DEAD_TOPICS=false` only gates the automatic per-tick dead-session deletion. A topic kept that way is still a binding pointing at a confirmed-dead window, so it surfaces as a `ghost_binding` audit issue; `/sync` (run directly or via its **Fix** button) closes and deletes it like any other ghost topic, regardless of the knob.
 
-Session creation also owns an exact topic record, saved before the first remote request. That ownership protects the topic throughout slow startup and replacement; it does not expire while the creation task is running. Startup, periodic cleanup, and `/sync` recover abandoned creation records from current session presence and verify the recorded Telegram topic before restoring its binding. If that topic was deleted while its target remains alive, recovery creates a fresh topic without replacing another current binding for the target. Failed recreation attempts with a known outcome remain queued across restarts and respect Telegram rate limits.
+Session creation owns an exact topic record, saved before the first remote request. That ownership protects the topic during slow startup and replacement. It does not expire while the creation task is running.
+
+Startup, periodic cleanup, and `/sync` recover abandoned creation records from current session presence. Recovery verifies the recorded Telegram topic by editing its title to the resolved session name before restoring its binding. It checks only abandoned creation records, never scans all active topics, and sends no temporary probe messages. Missing edit permission or transport errors leave the creation record unresolved.
+
+If the title changes, Telegram posts a rename service message. The rename can remove status, provider, and YOLO badges. A later status refresh may restore these badges and produce another rename notice.
+
+If the recorded topic was deleted while its target remains alive, recovery creates a fresh topic without replacing another current binding for the target. Failed recreation attempts with a known outcome remain queued across restarts and respect Telegram rate limits.
 
 A confirmed absent target can have its known topic cleaned up. An unknown target or an uncertain creation result without a new topic ID remains protected and appears as creation awaiting confirmation; CCGram does not guess whether the remote creation succeeded or repeat an ambiguous request. Targets belonging to a different backend are unverified, never treated as absent by the selected backend.
 
@@ -621,6 +629,34 @@ Security (project-scoped, deny-by-default):
 - Excluded dirs are never shown: `node_modules`, `__pycache__`, `.venv`, `dist`, `build`, etc.
 
 Tunables: `CCGRAM_SEND_SEARCH_DEPTH` (default 5), `CCGRAM_SEND_MAX_RESULTS` (default 50).
+
+## Topic Command Panels (`/commands`)
+
+CCGram pins a command panel in General and in each named topic. The panel reads the current topic binding, so it shows only actions that fit that topic.
+
+In General, the panel shows four controls: Commands, Sessions, Audit state, and Update ccgram. General has no agent or terminal session. The first ordinary General message creates and pins the panel. `/commands` opens or refreshes it. `/start` remains available for the welcome message.
+
+In an unbound named topic, use **Set up session** to open the existing session picker. After a session is bound, the panel shows CCGram actions available for that session and the provider's discovered commands. Shell topics do not show agent commands. Commands that require a transcript appear only for transcript-backed providers.
+
+The bound-topic panel includes **Dashboard**. It sends a fresh signed WebApp button to the authorized user's private chat, never to the group. If Telegram refuses the DM, start the bot privately with `/start`, then retry `/dashboard`. The shared native `/` list remains the four controls above.
+
+Agent buttons display and send the provider's original command name. For example, a discovered `spec:work` command appears as `/spec:work`, not `/spec_work`. The panel shows eight agent commands per page when more commands are available. Long command names stay intact in the panel and use a short button label when Telegram's 64-character button limit requires it.
+
+Destructive actions such as `/clear`, `/new`, `/rewind`, `/unbind`, and `/upgrade` ask for confirmation before execution. A panel action is revalidated against its owner, chat, topic, session, and provider before dispatch. Open `/commands` again if a panel is stale.
+
+These mobile screenshots are rendered from the offline HTML prototype. They illustrate Telegram message and inline-button controls, not live Telegram screens.
+
+![Telegram General topic with its four CCGram controls](assets/command-panels/general-mobile.png)
+
+![Telegram Claude topic with native agent command names](assets/command-panels/claude-mobile.png)
+
+![Telegram terminal topic with terminal-only controls](assets/command-panels/terminal-mobile.png)
+
+### Telegram's `/` command list
+
+Telegram does not provide a command-menu scope for individual forum topics. CCGram therefore keeps the native `/` list topic-safe and shared: `/commands`, `/sessions`, `/sync`, and `/upgrade`. Use the pinned panel for topic-specific CCGram and agent commands. Telegram cannot show a different native `/` list immediately when you switch topics.
+
+After upgrading CCGram, restart the bot. Send `/commands` in a chat if Telegram still shows an older command list there.
 
 ## Action Toolbar (`/toolbar`)
 

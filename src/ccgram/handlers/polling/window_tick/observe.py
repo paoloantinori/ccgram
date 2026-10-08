@@ -19,7 +19,6 @@ from ....providers import get_provider_for_window
 from ....providers.base import StatusUpdate
 from ....session_monitor import get_active_monitor
 from ....multiplexer import agent_status_cache
-from ....multiplexer.agent_status_cache import resolve_agent_working
 from ....multiplexer import multiplexer as tmux_manager
 from ....multiplexer.vim_state import has_insert_indicator, notify_vim_insert_seen
 from ..polling_state import terminal_poll_state, terminal_screen_buffer
@@ -93,7 +92,7 @@ async def _resolve_status(
         runtime=runtime,
     )
     if status is not None and not (
-        status.is_interactive and await resolve_agent_working(window_id)
+        status.is_interactive and await _agent_working(window_id)
     ):
         return status
     clean_text = sb.get_rendered_text(window_id, pane_text)
@@ -102,7 +101,7 @@ async def _resolve_status(
         pane_title = await tmux_manager.get_pane_title(w.window_id)
     status = provider.parse_terminal_status(clean_text, pane_title=pane_title)
     if status is not None and not (
-        status.is_interactive and await resolve_agent_working(window_id)
+        status.is_interactive and await _agent_working(window_id)
     ):
         # TASK-47: a selection-shaped region on a WORKING pane is Claude
         # Code's queued-input block (messages typed mid-turn), not a
@@ -115,6 +114,25 @@ async def _resolve_status(
     return await _native_agent_status(window_id)
 
 
+async def _agent_working(window_id: str) -> bool:
+    """Whether the window's agent is working, resolving cold or stale state.
+
+    The TASK-47 gates use this: a selection-shaped region on a working
+    pane is Claude Code's queued-input block, not a prompt, and a stale
+    frozen "working" must not suppress real prompts either. Cache-first
+    on every backend (a warm push entry answers without a subprocess);
+    a cold cache probes once, and backends without native status answer
+    None, which leaves the gate permissive.
+    """
+    try:
+        native = await agent_status_cache.get_status_or_probe(
+            window_id, lambda: tmux_manager.agent_status(window_id)
+        )
+    except Exception:  # noqa: BLE001  # a failed probe must not break ticks
+        return False
+    return native is not None and native.state == "working"
+
+
 async def _native_agent_status(window_id: str) -> StatusUpdate | None:
     """Synthesize a busy StatusUpdate from the backend's native agent status.
 
@@ -125,10 +143,17 @@ async def _native_agent_status(window_id: str) -> StatusUpdate | None:
     """
     if not tmux_manager.capabilities.native_agent_status:
         return None
-    # One freshness policy with the TASK-47 gates: TTL-fresh push entry,
-    # else one ``agent_status`` probe whose result is written back (a
-    # silent stream drop must not synthesize busy state from frozen data).
-    native = await agent_status_cache.resolve_agent_status(window_id)
+    # Push-primary: read the event-stream cache (no subprocess). On a cold cache
+    # (just-bound, before the first push, or a backend without an event stream)
+    # fall back to one ``agent_status`` subprocess call. On event-stream backends
+    # the push keeps the cache warm, so the per-tick subprocess is skipped.
+    if tmux_manager.capabilities.supports_event_stream:
+        native = await agent_status_cache.get_status_or_probe(
+            window_id, lambda: tmux_manager.agent_status(window_id)
+        )
+    else:
+        # Probe-only backends have no push stream to refresh cached transitions.
+        native = await tmux_manager.agent_status(window_id)
     if native is None:
         return None
     if native.state == "working":

@@ -5,6 +5,32 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [4.15.1] - 2026-10-08
+
+### Fixed
+- Keep `/sync` quiet by removing its scan of every bound Telegram topic; it no longer posts temporary probe messages and still cleans up topics for confirmed-closed sessions.
+- Verify abandoned topic-creation records by editing the recorded topic title instead of posting a probe message. A changed title can generate a Telegram rename notice; status badges may return on a later refresh.
+
+## [4.15.0] - 2026-10-08
+
+### Added
+- Add topic-aware `/commands` panels with session-specific CCGram actions and provider-native command names. General shows only shared controls; destructive actions require confirmation.
+- Keep `/commands`, `/sessions`, `/sync`, and `/upgrade` in Telegram’s shared slash-command suggestions, with `/commands` opening the current topic’s panel.
+
+### Fixed
+- Forward panel callbacks as the clicking Telegram user so native provider commands reach the bound session.
+- Reuse the topic’s cached panel on `/commands` and restore it after confirming an agent action.
+- Refresh owner-validated panels when their callback token expires, without dispatching the stale button.
+- Stop logging the same agent-to-shell recovery state on every polling cycle.
+
+### Upgrade
+- Restart ccgram after upgrading to register the shared slash-command menu. Send `/commands` once to refresh panels from an older version if their buttons report expiration. No configuration migration is required.
+
+## [4.14.1] - 2026-10-03
+
+### Fixed
+- Notify the agent with the absolute upload path ([#296](https://github.com/alexei-led/ccgram/pull/296))
+
 ## [4.14.0] - 2026-10-01
 
 ### Fixed

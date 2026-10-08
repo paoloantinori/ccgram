@@ -326,7 +326,7 @@ def create_bot() -> Application:
     )
 
     application.add_error_handler(_error_handler)
-    register_all(application, _group_filter)
+    register_all(application, _group_filter, group_id=config.group_id)
 
     # Extension seam (docs/extension-seam.md): out-of-tree packages
     # register PTB handlers + domain-event listeners. Runs before

@@ -200,13 +200,7 @@ def _context_start(lines: list[str], top_idx: int, context_above: int) -> int:
 
 # How far a numbered-item bottom may sit from the pane's last non-empty
 # line and still count as a selection footer (scrollback guard).
-# A numbered-item bottom without an action-hint footer is only trusted
-# when the numbered option sits on the very next line under the cursor:
-# live menus render options as a contiguous block starting at the
-# cursor, while transcript echoes (user messages render with the same
-# glyph) are separated from later numbered replies by at least the
-# blank line Claude Code draws between turns (2026-10-03 incident).
-_NUMBERED_OPTION_CONTIGUITY = 1
+_SCROLLBACK_GUARD_DISTANCE = 12
 
 
 def _last_nonempty_from(lines: list[str], top_idx: int) -> int | None:
@@ -218,19 +212,37 @@ def _last_nonempty_from(lines: list[str], top_idx: int) -> int | None:
 
 
 def _rejects_scrollback_footer(lines: list[str], top_idx: int, bottom_idx: int) -> bool:
-    """Whether a numbered-item bottom is scrollback, not a live footer.
+    """Reject detached numbered echoes as well as distant numbered bottoms.
 
-    Without an action-hint footer, a numbered bottom is only trusted
-    when the numbered option sits on the very next line under the
-    cursor: live menus render their options as a contiguous block
-    starting at the cursor, at any list length and any pane depth,
-    while transcript echoes (user messages render with the same glyph)
-    are separated from later numbered replies by at least the blank
-    line Claude Code draws between turns.
+    A live no-hint menu has a cursor before its next numbered option, with
+    only aligned wrapped text between them. Consecutive numbered items extend
+    the footer. Action-hint footers remain valid without this contiguity.
     """
     if any(p.search(lines[bottom_idx]) for p in _SELECTION_HINT_BOTTOMS):
         return False
-    return bottom_idx - top_idx > _NUMBERED_OPTION_CONTIGUITY
+    if bottom_idx != top_idx + 1:
+        selected = re.match(r"^\s*[❯›]\s+\d+\.\s+", lines[top_idx])
+        if selected is None:
+            return True
+        text_indent = " " * selected.end()
+        if any(
+            not line.strip() or not line.startswith(text_indent)
+            for line in lines[top_idx + 1 : bottom_idx]
+        ):
+            return True
+    last = bottom_idx
+    for i in range(bottom_idx, len(lines)):
+        line = lines[i]
+        if not line.strip():
+            continue
+        if _SELECTION_NUMBERED_BOTTOM.search(line):
+            last = i
+        else:
+            break
+    tail = _last_nonempty_from(lines, last)
+    if tail is None:
+        return False
+    return tail - last > _SCROLLBACK_GUARD_DISTANCE
 
 
 def _try_extract(lines: list[str], pattern: UIPattern) -> InteractiveUIContent | None:
