@@ -1622,6 +1622,9 @@ class ThreadRouter:
         return self.window_display_names.get(window_id, window_id)
 
     def pop_display_name(self, window_id: str) -> str:
+        # Remove the pin with the name: an unpinned successor must not
+        # inherit the stale skip.
+        self.window_display_pins.discard(window_id)
         """Remove and return display name for window_id. Falls back to window_id."""
         if window_id not in self.window_display_names:
             return window_id

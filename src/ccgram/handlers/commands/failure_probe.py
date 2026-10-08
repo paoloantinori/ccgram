@@ -65,8 +65,18 @@ def _extract_probe_error_line(text: str, command: str | None = None) -> str | No
         if _COMMAND_ERROR_RE.search(line) or (
             "error" in line.lower() and "command" in line.lower()
         ):
-            if stem and stem.lower() not in line.lower():
-                continue
+            # Anchor on the "Unknown command: X" phrase: a bare stem
+            # anywhere in the line would also match the suggestion
+            # ("Did you mean /pa:research?") and let the suggested
+            # command fail the suggested one.
+            if stem:
+                pattern = (
+                    "(?i)unknown command:\\s*/?"
+                    + re.escape(stem.lstrip("/"))
+                    + "(?![\\w-])"
+                )
+                if not re.search(pattern, line):
+                    continue
             return line
     return None
 
