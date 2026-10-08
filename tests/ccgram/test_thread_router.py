@@ -1219,3 +1219,19 @@ class TestDisplayNamePins:
         router.unbind_thread(1, 42)  # unbound + no state: prunes name and pin
         assert "@1" not in router.window_display_names
         assert "@1" not in router.pinned_display_names
+
+    def test_legacy_window_display_pins_key_is_migrated(
+        self, router: ThreadRouter
+    ) -> None:
+        # The pre-#318 fork persisted pins under window_display_pins; a
+        # deployed state file written by that code must keep its pins.
+        router.from_dict(
+            {
+                "window_display_names": {"@1": "user choice"},
+                "window_display_pins": ["@1"],
+            }
+        )
+        assert router.pinned_display_names == {"@1"}
+        changed = router.sync_display_names([("@1", "auto prefix name")])
+        assert not changed
+        assert router.get_display_name("@1") == "user choice"

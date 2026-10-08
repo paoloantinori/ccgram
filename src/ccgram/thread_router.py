@@ -360,7 +360,11 @@ class ThreadRouter:
                 continue
             self.private_topic_chats.add(chat_id)
         self.window_display_names = data.get("window_display_names", {})
-        raw_pinned_names = data.get("pinned_display_names", [])
+        # The pre-#318 fork persisted pins as window_display_pins; read them
+        # back once so deployed state keeps its user-chosen names.
+        raw_pinned_names = data.get(
+            "pinned_display_names", data.get("window_display_pins", [])
+        )
         self.pinned_display_names = (
             {
                 window_id

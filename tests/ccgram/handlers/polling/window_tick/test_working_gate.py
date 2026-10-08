@@ -10,7 +10,7 @@ status instead of latching a false interactive state.
 from __future__ import annotations
 
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 from ccgram.handlers.polling.window_tick import observe
 from ccgram.handlers.polling.window_tick.observe import _resolve_status
@@ -81,4 +81,41 @@ async def test_idle_status_keeps_interactive() -> None:
     agent_status_cache.set_status("w3", AgentStatus(state="idle"))
     with patch.object(observe, "_parse_with_pyte", return_value=_INTERACTIVE):
         result = await _resolve_status("w3", "pane", _WINDOW)
+    assert result is not None and result.is_interactive
+
+
+def _native_mux(agent_status: AsyncMock) -> MagicMock:
+    mux = MagicMock()
+    mux.agent_status = agent_status
+    return mux
+
+
+async def test_cold_cache_probes_and_suppresses_on_working() -> None:
+    # Cold cache: the gate's probe lambda runs and its "working" answer
+    # suppresses the interactive-looking status.
+    mux = _native_mux(AsyncMock(return_value=AgentStatus(state="working")))
+    native = StatusUpdate(raw_text="working", display_label="working")
+    with (
+        patch.object(observe, "_parse_with_pyte", return_value=_INTERACTIVE),
+        patch.object(observe, "_get_provider", return_value=_provider(None)),
+        patch.object(observe, "tmux_manager", mux),
+        patch.object(observe, "_native_agent_status", AsyncMock(return_value=native)),
+    ):
+        result = await _resolve_status("w1", "pane", _WINDOW)
+    assert result is not None and not result.is_interactive
+    mux.agent_status.assert_awaited_once_with("w1")
+
+
+async def test_raising_probe_fails_open_and_keeps_interactive() -> None:
+    # A backend probe error (e.g. herdr transport failure raising
+    # HerdrError, a RuntimeError) must not break the tick: the gate
+    # answers "not working" and the interactive status stands.
+    mux = _native_mux(AsyncMock(side_effect=RuntimeError("socket dead")))
+    with (
+        patch.object(observe, "_parse_with_pyte", return_value=_INTERACTIVE),
+        patch.object(observe, "_get_provider", return_value=_provider(None)),
+        patch.object(observe, "tmux_manager", mux),
+        patch.object(observe, "_native_agent_status", AsyncMock(return_value=None)),
+    ):
+        result = await _resolve_status("w2", "pane", _WINDOW)
     assert result is not None and result.is_interactive
