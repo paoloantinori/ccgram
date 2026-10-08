@@ -139,8 +139,6 @@ async def test_cache_hit_skips_subprocess() -> None:
 
 
 async def test_cold_cache_falls_back_to_probe() -> None:
-    from ccgram.multiplexer import agent_status_cache
-
     mux = _fake_mux(native=True, status=AgentStatus(state="working", agent="codex"))
     with (
         patch("ccgram.handlers.polling.window_tick.observe.tmux_manager", mux),
