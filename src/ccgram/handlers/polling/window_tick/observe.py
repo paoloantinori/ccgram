@@ -94,6 +94,7 @@ async def _resolve_status(
     if status is not None and not (
         status.is_interactive and await _agent_working(window_id)
     ):
+        # Same TASK-47 working-agent gate as the provider parse below.
         return status
     clean_text = sb.get_rendered_text(window_id, pane_text)
     pane_title = ""
@@ -123,6 +124,10 @@ async def _agent_working(window_id: str) -> bool:
     on every backend (a warm push entry answers without a subprocess);
     a cold cache probes once, and backends without native status answer
     None, which leaves the gate permissive.
+
+    The gate fails open on purpose: a raised probe answers "not working".
+    ``_native_agent_status`` propagates probe failures instead, so they
+    count toward the tick's probe-failure accounting.
     """
     try:
         native = await agent_status_cache.get_status_or_probe(

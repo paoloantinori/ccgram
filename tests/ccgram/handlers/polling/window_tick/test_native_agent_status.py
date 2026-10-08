@@ -71,9 +71,7 @@ async def test_working_state_becomes_busy_status() -> None:
         native=True,
         status=AgentStatus(state="working", agent="codex", custom_status="indexing"),
     )
-    with (
-        patch("ccgram.handlers.polling.window_tick.observe.tmux_manager", mux),
-    ):
+    with patch("ccgram.handlers.polling.window_tick.observe.tmux_manager", mux):
         status = await _native_agent_status("w2:t1")
     assert status is not None
     assert status.raw_text == "indexing"  # custom_status preferred
@@ -82,9 +80,7 @@ async def test_working_state_becomes_busy_status() -> None:
 
 async def test_working_without_custom_status_uses_default_label() -> None:
     mux = _fake_mux(native=True, status=AgentStatus(state="working", agent="codex"))
-    with (
-        patch("ccgram.handlers.polling.window_tick.observe.tmux_manager", mux),
-    ):
+    with patch("ccgram.handlers.polling.window_tick.observe.tmux_manager", mux):
         status = await _native_agent_status("w2:t1")
     assert status is not None
     assert status.raw_text == "working"
@@ -92,9 +88,7 @@ async def test_working_without_custom_status_uses_default_label() -> None:
 
 async def test_blocked_state_surfaces_waiting() -> None:
     mux = _fake_mux(native=True, status=AgentStatus(state="blocked", agent="claude"))
-    with (
-        patch("ccgram.handlers.polling.window_tick.observe.tmux_manager", mux),
-    ):
+    with patch("ccgram.handlers.polling.window_tick.observe.tmux_manager", mux):
         status = await _native_agent_status("w2:t1")
     assert status is not None
     assert status.raw_text == "waiting for input"
@@ -129,9 +123,7 @@ async def test_cache_hit_skips_subprocess() -> None:
     agent_status_cache.set_status(
         "w2:t1", AgentStatus(state="working", agent="codex", custom_status="linking")
     )
-    with (
-        patch("ccgram.handlers.polling.window_tick.observe.tmux_manager", mux),
-    ):
+    with patch("ccgram.handlers.polling.window_tick.observe.tmux_manager", mux):
         status = await _native_agent_status("w2:t1")
     assert status is not None
     assert status.raw_text == "linking"  # from the cache, not the subprocess
@@ -140,9 +132,7 @@ async def test_cache_hit_skips_subprocess() -> None:
 
 async def test_cold_cache_falls_back_to_probe() -> None:
     mux = _fake_mux(native=True, status=AgentStatus(state="working", agent="codex"))
-    with (
-        patch("ccgram.handlers.polling.window_tick.observe.tmux_manager", mux),
-    ):
+    with patch("ccgram.handlers.polling.window_tick.observe.tmux_manager", mux):
         status = await _native_agent_status("w2:t1")
     assert status is not None
     assert status.raw_text == "working"
