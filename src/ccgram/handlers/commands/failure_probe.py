@@ -62,22 +62,30 @@ def _extract_probe_error_line(text: str, command: str | None = None) -> str | No
         line = raw_line.strip()
         if not line:
             continue
-        if _COMMAND_ERROR_RE.search(line) or (
-            "error" in line.lower() and "command" in line.lower()
+        if not (
+            _COMMAND_ERROR_RE.search(line)
+            or ("error" in line.lower() and "command" in line.lower())
         ):
-            # Anchor on the "Unknown command: X" phrase: a bare stem
-            # anywhere in the line would also match the suggestion
-            # ("Did you mean /pa:research?") and let the suggested
-            # command fail the suggested one.
-            if stem:
-                pattern = (
-                    "(?i)unknown command:\\s*/?"
-                    + re.escape(stem.lstrip("/"))
-                    + "(?![\\w-])"
-                )
-                if not re.search(pattern, line):
-                    continue
-            return line
+            continue
+        # The line must name the dispatched command as a whole token:
+        # anywhere-in-line substring matching would also match the
+        # suggestion ("Did you mean /pa:research?") and let the
+        # suggested command fail the suggested one. Accept any provider
+        # phrasing (unknown / unrecognized / command not found, quoted
+        # or slashed) before the name, and require a non-name boundary
+        # after it so a shorter dispatched command cannot match a
+        # longer colon-namespaced one (/spec vs /spec:work).
+        if stem:
+            escaped = re.escape(stem.lstrip("/"))
+            pattern = (
+                "(?i)(?:unknown|unrecognized) command[: ]+['/]*"
+                + escaped
+                + "(?![\\w:-])"
+            )
+            fallback = "(?i)command not found[: ]+['/]*" + escaped + "(?![\\w:-])"
+            if not (re.search(pattern, line) or re.search(fallback, line)):
+                continue
+        return line
     return None
 
 
