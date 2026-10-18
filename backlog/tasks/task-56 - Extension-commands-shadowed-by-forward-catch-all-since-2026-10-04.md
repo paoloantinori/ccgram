@@ -28,5 +28,7 @@ extension commands outrank the catch-all, unknown commands still reach it.
 
 ## Deploy
 
-Both bridges 2026-10-18 (deploy contract script). Verified with /names in
-the affected topic.
+Both bridges 2026-10-18 (deploy contract script): extension loaded and
+service restarted on each (bird journal, Mac ~/Library/Logs/ccgram.log,
+new pid 16463). Live /names confirmation pending the maintainer's retry
+in the affected topic (only the Telegram user can send it).
