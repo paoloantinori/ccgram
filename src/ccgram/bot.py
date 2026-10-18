@@ -326,11 +326,15 @@ def create_bot() -> Application:
     )
 
     application.add_error_handler(_error_handler)
-    register_all(application, _group_filter, group_id=config.group_id)
 
-    # Extension seam (docs/extension-seam.md): out-of-tree packages
-    # register PTB handlers + domain-event listeners. Runs before
-    # run_polling captures allowed_updates.
+    # Extension seam: out-of-tree packages (ccgram-ext) register PTB
+    # handlers + domain-event listeners. MUST run before
+    # register_all: PTB handles at most one handler per group (first
+    # registered wins), so extension commands registered later are
+    # shadowed by the command-forwarding catch-all and fall through to
+    # the agent as unknown commands (2026-10-18: /names apply). Also
+    # before run_polling captures allowed_updates.
     load_extensions(application.add_handler)
+    register_all(application, _group_filter, group_id=config.group_id)
 
     return application
