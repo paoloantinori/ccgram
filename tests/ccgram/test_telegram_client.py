@@ -44,6 +44,14 @@ def fake_bot() -> MagicMock:
         "set_my_commands",
     ):
         setattr(bot, name, AsyncMock(return_value=True))
+    # The audited send methods return a Message in PTB; the delivery
+    # audit reads message.message_id, so the fakes mirror that contract.
+    from telegram import Message as _Message
+
+    delivered = MagicMock(spec=_Message)
+    delivered.message_id = 1
+    for name in ("send_message", "send_photo", "send_document", "send_voice"):
+        getattr(bot, name).return_value = delivered
     return bot
 
 

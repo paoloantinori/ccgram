@@ -26,10 +26,14 @@ from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import Any, Protocol, cast, runtime_checkable
 
+import structlog
 from telegram import Bot, BotCommand, ChatFullInfo, File, ForumTopic, Message, User
 from telegram._botcommandscope import BotCommandScope
 from telegram._files.inputmedia import InputMedia
 from telegram._reaction import ReactionType
+
+
+logger = structlog.get_logger()
 
 
 @runtime_checkable
@@ -196,10 +200,37 @@ class PTBTelegramClient:
     async def send_message(
         self, chat_id: int | str, text: str, **kwargs: Any
     ) -> Message:
-        return await self._bot.send_message(
+        message = await self._bot.send_message(
             chat_id=chat_id,
             text=text,
             **kwargs,
+        )
+        self._audit_send("message", chat_id, message, kwargs, text_len=len(text))
+        return message
+
+    @staticmethod
+    def _audit_send(
+        kind: str,
+        chat_id: int | str,
+        message: Message,
+        kwargs: dict[str, Any],
+        *,
+        text_len: int | None = None,
+    ) -> None:
+        """Delivery audit: successful sends must leave a trace, or a lost
+        message cannot be told apart from an unobserved one (2026-10-19).
+        Content never enters the record, only metadata. Requires the log
+        level to be INFO or lower: a WARNING-level bridge stays blind.
+        Raw-bot senders outside this adapter (DraftStream, the shutdown
+        banner) are not covered; see the delivery-audit task notes.
+        """
+        logger.info(
+            "telegram send ok",
+            kind=kind,
+            chat_id=chat_id,
+            thread_id=kwargs.get("message_thread_id"),
+            message_id=message.message_id,
+            text_len=text_len,
         )
 
     async def edit_message_text(
@@ -244,20 +275,24 @@ class PTBTelegramClient:
     async def send_photo(
         self, chat_id: int | str, photo: Any, **kwargs: Any
     ) -> Message:
-        return await self._bot.send_photo(
+        message = await self._bot.send_photo(
             chat_id=chat_id,
             photo=photo,
             **kwargs,
         )
+        self._audit_send("photo", chat_id, message, kwargs)
+        return message
 
     async def send_document(
         self, chat_id: int | str, document: Any, **kwargs: Any
     ) -> Message:
-        return await self._bot.send_document(
+        message = await self._bot.send_document(
             chat_id=chat_id,
             document=document,
             **kwargs,
         )
+        self._audit_send("document", chat_id, message, kwargs)
+        return message
 
     async def send_chat_action(
         self, chat_id: int | str, action: str, **kwargs: Any
@@ -269,11 +304,13 @@ class PTBTelegramClient:
     async def send_voice(
         self, chat_id: int | str, voice: Any, **kwargs: Any
     ) -> Message:
-        return await self._bot.send_voice(
+        message = await self._bot.send_voice(
             chat_id=chat_id,
             voice=voice,
             **kwargs,
         )
+        self._audit_send("voice", chat_id, message, kwargs)
+        return message
 
     async def set_message_reaction(
         self,
