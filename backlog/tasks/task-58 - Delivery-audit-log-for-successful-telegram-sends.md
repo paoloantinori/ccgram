@@ -18,9 +18,9 @@ diagnosis stayed circumstantial for lack of one positive send trace.
 
 `PTBTelegramClient.send_message` logs an INFO audit line on every
 successful send with chat_id, thread_id, the returned message_id, and the
-text length. The adapter is the single choke point every outbound new
-message passes through, so the line covers the queue worker, status
-updates, replies, and panels with one site.
+text length. The adapter is the choke point for every send that goes
+through the client seam, so the line covers the queue worker, status
+updates, replies, panels, and file delivery with one site.
 
 ## Coverage after review
 
