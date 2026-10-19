@@ -15,9 +15,11 @@ import time
 from typing import Any, Final, Literal
 
 import structlog
-from telegram import Bot, InlineKeyboardMarkup
+from telegram import Bot, InlineKeyboardMarkup, Message
+
 from telegram.error import BadRequest, NetworkError, RetryAfter, TelegramError, TimedOut
 
+from .telegram_client import audit_send
 from .telegram_rate_limiter import retry_after_seconds
 from .utils import log_throttled
 
@@ -281,6 +283,16 @@ class DraftStream:
                 )
             except TelegramError as exc:
                 logger.warning("DraftStream.abort delete failed: %s", exc)
+                return
+            # The delivery audit recorded this send (kind=draft); the
+            # compensating trace keeps an aborted fallback message from
+            # reading as a delivery the user should still see.
+            logger.info(
+                "telegram draft deleted",
+                chat_id=self._chat_id,
+                thread_id=self._thread_id,
+                message_id=self._message_id,
+            )
         self._closed = True
 
     def _ensure_open(self) -> None:
@@ -337,12 +349,23 @@ class DraftStream:
         self._last_draft_at = time.monotonic()
         self._mode = DRAFT_STREAMING
 
+    def _audit(self, message: Message) -> None:
+        """Record this persisted draft send in the delivery audit."""
+        audit_send(
+            "draft",
+            self._chat_id,
+            message,
+            thread_id=self._thread_id,
+            text_len=len(self.text),
+        )
+
     async def _start_legacy(self) -> None:
         message = await self._bot.send_message(
             chat_id=self._chat_id,
             text=self.text,
             **self._send_kwargs(),
         )
+        self._audit(message)
         self._message_id = message.message_id
         self._mode = DRAFT_LEGACY
 
@@ -448,6 +471,7 @@ class DraftStream:
         except TelegramError as exc:
             logger.warning("DraftStream final send failed: %s", exc)
             raise
+        self._audit(message)
         self._message_id = message.message_id
 
     async def _push_legacy(  # noqa: C901

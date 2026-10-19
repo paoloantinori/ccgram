@@ -36,6 +36,31 @@ from telegram._reaction import ReactionType
 logger = structlog.get_logger()
 
 
+def audit_send(
+    kind: str,
+    chat_id: int | str,
+    message: Message,
+    *,
+    thread_id: int | None,
+    text_len: int | None = None,
+) -> None:
+    """Delivery audit: successful sends must leave a trace, or a lost
+    message cannot be told apart from an unobserved one (2026-10-19).
+    Content never enters the record, only metadata. Requires the log
+    level to be INFO or lower: a WARNING-level bridge stays blind.
+    Raw-bot senders outside the adapter methods (DraftStream, the
+    shutdown banner) call this directly with kind "draft"/"banner".
+    """
+    logger.info(
+        "telegram send ok",
+        kind=kind,
+        chat_id=chat_id,
+        thread_id=thread_id,
+        message_id=message.message_id,
+        text_len=text_len,
+    )
+
+
 @runtime_checkable
 class TelegramClient(Protocol):
     """Narrow seam over the PTB ``Bot`` methods used in this codebase.
@@ -205,33 +230,14 @@ class PTBTelegramClient:
             text=text,
             **kwargs,
         )
-        self._audit_send("message", chat_id, message, kwargs, text_len=len(text))
-        return message
-
-    @staticmethod
-    def _audit_send(
-        kind: str,
-        chat_id: int | str,
-        message: Message,
-        kwargs: dict[str, Any],
-        *,
-        text_len: int | None = None,
-    ) -> None:
-        """Delivery audit: successful sends must leave a trace, or a lost
-        message cannot be told apart from an unobserved one (2026-10-19).
-        Content never enters the record, only metadata. Requires the log
-        level to be INFO or lower: a WARNING-level bridge stays blind.
-        Raw-bot senders outside this adapter (DraftStream, the shutdown
-        banner) are not covered; see the delivery-audit task notes.
-        """
-        logger.info(
-            "telegram send ok",
-            kind=kind,
-            chat_id=chat_id,
+        audit_send(
+            "message",
+            chat_id,
+            message,
             thread_id=kwargs.get("message_thread_id"),
-            message_id=message.message_id,
-            text_len=text_len,
+            text_len=len(text),
         )
+        return message
 
     async def edit_message_text(
         self,
@@ -280,7 +286,7 @@ class PTBTelegramClient:
             photo=photo,
             **kwargs,
         )
-        self._audit_send("photo", chat_id, message, kwargs)
+        audit_send("photo", chat_id, message, thread_id=kwargs.get("message_thread_id"))
         return message
 
     async def send_document(
@@ -291,7 +297,9 @@ class PTBTelegramClient:
             document=document,
             **kwargs,
         )
-        self._audit_send("document", chat_id, message, kwargs)
+        audit_send(
+            "document", chat_id, message, thread_id=kwargs.get("message_thread_id")
+        )
         return message
 
     async def send_chat_action(
@@ -309,7 +317,7 @@ class PTBTelegramClient:
             voice=voice,
             **kwargs,
         )
-        self._audit_send("voice", chat_id, message, kwargs)
+        audit_send("voice", chat_id, message, thread_id=kwargs.get("message_thread_id"))
         return message
 
     async def set_message_reaction(
@@ -669,6 +677,7 @@ def unwrap_bot(client: TelegramClient) -> Bot:
 
 
 __all__ = [
+    "audit_send",
     "FakeTelegramClient",
     "PTBTelegramClient",
     "TelegramClient",

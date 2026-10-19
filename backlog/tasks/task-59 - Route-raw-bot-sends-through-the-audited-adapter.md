@@ -1,6 +1,6 @@
 # Task 59: Route raw-bot sends through the audited adapter
 
-Status: open
+Status: done (2026-10-18)
 Filed: 2026-10-19 (code-review finding on the task-58 audit)
 
 ## Problem
@@ -28,9 +28,17 @@ take the adapter, or emit the same `telegram send ok` line at the three
 DraftStream send sites and the banner site. Prefer the adapter passthrough
 (one audit point) if it does not grow the Protocol awkwardly.
 
-## Acceptance
+## Resolution
 
-- A streamed assistant message and a tool-batch final message each leave
-  a `telegram send ok` line with message_id.
-- The shutdown banner leaves one.
-- No Protocol change without checking the F1 boundary rules.
+Call-site instrumentation (the adapter-passthrough alternative would have
+widened the TelegramClient Protocol for no audit payoff: the draft-API
+pushes are ephemeral previews with no message id, and the persisted sends
+already had plain send_message sites to instrument). audit_send extracted
+to a module function in telegram_client; DraftStream._start_legacy and
+_send_final_message call it (kind=draft); the shutdown banner calls it
+(kind=banner) inside a suppress so a failed audit cannot turn a clean
+stop into a crash. DraftStream.abort emits a compensating
+"telegram draft deleted" trace so an aborted legacy fallback message
+does not read as a delivery. Code-review round 2 findings all closed
+(banner try, lazy import hoisted, delegator inlined, __all__, import
+grouping, final-send thread assertion).

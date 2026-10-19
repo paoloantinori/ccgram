@@ -220,3 +220,16 @@ def sample_pane_status_line():
 @pytest.fixture
 def sample_pane_no_ui():
     return "$ echo hello\nhello\n$\n"
+
+
+def _bot_returning(message_id: int):
+    """A Bot mock whose send_message delivers a Message with the given id."""
+    from unittest.mock import AsyncMock, MagicMock
+
+    from telegram import Message
+
+    bot = MagicMock()
+    delivered = MagicMock(spec=Message)
+    delivered.message_id = message_id
+    bot.send_message = AsyncMock(return_value=delivered)
+    return bot

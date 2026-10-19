@@ -14,6 +14,7 @@ Responsibilities kept here:
     by the message handler registry
 """
 
+import contextlib
 import logging
 import os
 import signal
@@ -36,6 +37,7 @@ from .handlers.messaging_pipeline import toolcalls_command, verbose_command
 from .handlers.messaging_pipeline.message_sender import safe_reply
 from .handlers.recovery.history import history_command
 from .extensions import load_extensions
+from .telegram_client import audit_send
 from .handlers.registry import register_all
 from .handlers.text.text_handler import handle_text_message, text_handler
 from .handlers.topics import new_command
@@ -225,12 +227,17 @@ async def _send_shutdown_notification(application: Application) -> None:
 
     text = f"🔌 ccgram stopped — {reason} (v{__version__})"
     try:
-        await application.bot.send_message(
+        message = await application.bot.send_message(
             chat_id=config.group_id,
             text=text,
         )
     except (TelegramError, RuntimeError) as exc:
         logger.debug("Shutdown notification skipped: %s", exc)
+        return
+    with contextlib.suppress(TelegramError, RuntimeError):
+        audit_send(
+            "banner", config.group_id, message, thread_id=None, text_len=len(text)
+        )
 
 
 async def post_stop(application: Application) -> None:
