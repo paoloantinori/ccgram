@@ -1,6 +1,6 @@
 # Task 54: Gate freshness policy on probe-only backends
 
-Status: open
+Status: done (2026-10-22)
 Filed: 2026-10-08 (altitude review of the v4.15 merge resolution)
 Source: /simplify altitude agent, finding 1
 
@@ -44,6 +44,24 @@ so fixing it fork-side means carrying a delta against freshly-canonicalized
 upstream code. The negative-only-cache idea (store None 15s, never store a
 positive) is an upstream issue candidate, to file only with the maintainer's
 issue-first workflow and explicit user approval.
+
+## Resolution (2026-10-22)
+
+Direction 1+2 combined, review-hardened. observe.py restructured around
+one shared seam: `_native_status_or_probe` (freshness policy
+cache_positive=supports_event_stream, fail-soft) plus a pure
+`_native_status_to_update` mapper; `_resolve_status` resolves the native
+status ONCE per tick (lazy closure shared by both TASK-47 gates and the
+gap-fill), so the probe-only worst case is one backend round-trip per
+tick instead of three. The cache module is byte-identical to open
+upstream PR #326 (port, zero additional fork delta). Tests: probe-only
+gate ignores a stale cached working within one probe (the task's
+acceptance), honors a fresh working probe, capability gate never probes,
+probe-only negative caching re-added at the helper level, stream-mode
+suppression now also asserts no probe ran. Pre-existing residual: the
+native_agent_status capability read sits outside any try (unwired-proxy
+window only; the poll loop starts post-bootstrap), unchanged by this
+task.
 
 ## Acceptance
 

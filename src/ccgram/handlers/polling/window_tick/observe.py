@@ -19,6 +19,7 @@ from ....providers import get_provider_for_window
 from ....providers.base import StatusUpdate
 from ....session_monitor import get_active_monitor
 from ....multiplexer import agent_status_cache
+from ....multiplexer.base import AgentStatus
 from ....multiplexer import multiplexer as tmux_manager
 from ....multiplexer.vim_state import has_insert_indicator, notify_vim_insert_seen
 from ..polling_state import terminal_poll_state, terminal_screen_buffer
@@ -83,6 +84,22 @@ async def _resolve_status(
 ) -> StatusUpdate | None:
     sb = runtime.screen_buffer if runtime is not None else terminal_screen_buffer
     provider = _get_provider(window_id)
+    # One native-status resolution per tick, shared by the TASK-47 gates
+    # and the gap-fill (probe-only backends would otherwise pay one
+    # round-trip per consumer; TASK-54).
+    native_cache: list[AgentStatus | None] = []
+    native_resolved = False
+
+    async def native_once() -> AgentStatus | None:
+        nonlocal native_resolved
+        if not native_resolved:
+            if not tmux_manager.capabilities.native_agent_status:
+                native_cache.append(None)
+            else:
+                native_cache.append(await _native_status_or_probe(window_id))
+            native_resolved = True
+        return native_cache[0]
+
     status = _parse_with_pyte(
         window_id,
         pane_text,
@@ -92,7 +109,9 @@ async def _resolve_status(
         runtime=runtime,
     )
     if status is not None and not (
-        status.is_interactive and await _agent_working(window_id)
+        status.is_interactive
+        and (n := await native_once()) is not None
+        and n.state == "working"
     ):
         # Same TASK-47 working-agent gate as the provider parse below.
         return status
@@ -102,7 +121,9 @@ async def _resolve_status(
         pane_title = await tmux_manager.get_pane_title(w.window_id)
     status = provider.parse_terminal_status(clean_text, pane_title=pane_title)
     if status is not None and not (
-        status.is_interactive and await _agent_working(window_id)
+        status.is_interactive
+        and (n := await native_once()) is not None
+        and n.state == "working"
     ):
         # TASK-47: a selection-shaped region on a WORKING pane is Claude
         # Code's queued-input block (messages typed mid-turn), not a
@@ -110,64 +131,43 @@ async def _resolve_status(
         # latching a false interactive state (which also blocked the
         # user's text via the dismissal-confirmation loop).
         return status
-    # Gap-fill: backends with native agent status (herdr) report a busy state
-    # for non-Claude agents whose terminal chrome the scrapers can't read.
-    return await _native_agent_status(window_id)
+    # Gap-fill: backends with native agent status report a busy state for
+    # non-Claude agents whose terminal chrome the scrapers can't read.
+    # native_once shares one probe with the TASK-47 gates above.
+    return _native_status_to_update(await native_once())
 
 
-async def _agent_working(window_id: str) -> bool:
-    """Whether the window's agent is working, resolving cold or stale state.
+async def _native_status_or_probe(window_id: str) -> AgentStatus | None:
+    """The window's native agent status, freshness-policied per backend.
 
-    The TASK-47 gates use this: a selection-shaped region on a working
-    pane is Claude Code's queued-input block, not a prompt, and a stale
-    frozen "working" must not suppress real prompts either. Cache-first
-    on every backend (a warm push entry answers without a subprocess);
-    a cold cache probes once, and backends without native status answer
-    None, which leaves the gate permissive.
-
-    Fails open: a raised probe answers "not working", same fail-soft
-    policy as ``_native_agent_status``. A backend probe failure must
-    not break the tick (herdr transport errors surface as HerdrError,
-    a RuntimeError, which the poll loop does not catch).
+    Stream backends (herdr): push refreshes the cache, so a cached
+    positive is trusted and the steady state costs no probe. Probe-only
+    backends (agterm) have no push: a cached positive could be stale for
+    the whole 90s TTL and suppress real prompts after a working-to-idle
+    transition (TASK-54), so positives pass through uncached (each
+    transition stays visible within one probe) and only negatives are
+    cached, for the short pass-through TTL. Fails soft: a raised probe
+    or capability read answers None (the gates stay permissive, the
+    gap-fill skips; herdr transport errors are RuntimeErrors the poll
+    loop does not catch).
     """
     try:
-        native = await agent_status_cache.get_status_or_probe(
-            window_id, lambda: tmux_manager.agent_status(window_id)
+        return await agent_status_cache.get_status_or_probe(
+            window_id,
+            lambda: tmux_manager.agent_status(window_id),
+            cache_positive=tmux_manager.capabilities.supports_event_stream,
         )
     except Exception:  # noqa: BLE001  # a failed probe must not break ticks
-        return False
-    return native is not None and native.state == "working"
+        return None
 
 
-async def _native_agent_status(window_id: str) -> StatusUpdate | None:
-    """Synthesize a busy StatusUpdate from the backend's native agent status.
+def _native_status_to_update(native: AgentStatus | None) -> StatusUpdate | None:
+    """Map a native agent status to the gap-fill StatusUpdate.
 
-    Only on ``native_agent_status`` backends (herdr). Surfaces ``working`` and
-    ``blocked`` (agent waiting for input) when terminal scraping yielded
-    nothing; ``idle`` / ``done`` / ``unknown`` return None so the existing
+    Surfaces ``working`` and ``blocked`` (agent waiting for input);
+    ``idle`` / ``done`` / ``unknown`` and None return None so the
     activity-based idle/done logic stays in control.
     """
-    if not tmux_manager.capabilities.native_agent_status:
-        return None
-    # Push-primary: read the event-stream cache (no subprocess). On a cold cache
-    # (just-bound, before the first push, or a backend without an event stream)
-    # fall back to one ``agent_status`` subprocess call. On event-stream backends
-    # the push keeps the cache warm, so the per-tick subprocess is skipped.
-    # Fail soft: the gap-fill is optional enrichment, and a backend probe
-    # error (herdr transport failures raise HerdrError, a RuntimeError)
-    # must not abort the whole poll cycle, which catches only
-    # (TelegramError, OSError).
-    try:
-        if tmux_manager.capabilities.supports_event_stream:
-            native = await agent_status_cache.get_status_or_probe(
-                window_id, lambda: tmux_manager.agent_status(window_id)
-            )
-        else:
-            # Probe-only backends have no push stream to refresh cached
-            # transitions.
-            native = await tmux_manager.agent_status(window_id)
-    except Exception:  # noqa: BLE001  # a failed probe must not break ticks
-        return None
     if native is None:
         return None
     if native.state == "working":
