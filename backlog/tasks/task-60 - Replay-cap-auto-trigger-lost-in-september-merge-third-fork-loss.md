@@ -1,6 +1,6 @@
 # Task 60: Replay-cap auto-trigger lost in a September merge (third fork loss)
 
-Status: open
+Status: done (2026-10-22, fix deployed; env value decision below)
 Filed: 2026-10-21, from the third eternal-replay incident (2026-10-19).
 
 ## Incident (third of the family: 2026-08-30, 2026-09-06, 2026-10-19)
@@ -47,6 +47,19 @@ what alarmed the maintainer. The action layer is what was lost.
    ordering, replay cap, queue emits) before pushing. Candidate: extend
    tests so each marker has a test that fails when the marker disappears
    (the seam already has one since task-56; the cap gets one here).
+
+## Resolution (2026-10-22)
+
+Restored on commit c0f12540 and deployed to both bridges. Review
+hardening over the September version: the knob lives in config.py as
+replay_cap_bytes (tolerant parse, CCGRAM_REPLAY_CAP_MB, 0 disables,
+sibling of the delivery-watch gap), a 10s per-session cooldown damps
+auto-skip retries for unresolvable barriers, and the regression guard
+is a WIRING test (check_for_updates level, red-checked by removing a
+hook) so the September loss shape (hooks dropped, method surviving)
+fails the battery. env values live: bird=16, mac=16 MB. Maintainer
+note: 16 tolerates hours of wedge before skipping; the September
+default was 1 (minutes). Lowering is one .env edit + restart.
 
 ## Acceptance
 
