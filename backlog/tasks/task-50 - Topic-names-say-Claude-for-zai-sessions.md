@@ -1,5 +1,7 @@
 # Topic names say "Claude" for zai sessions
 
+Status: done (absorbed 2026-10; provider_display.py maps the zai variant, live in both bridges)
+
 Reported 2026-10-02 by the maintainer (Telegram screenshot): every forum
 topic is named "Claude · <window>" even for sessions that run the zai
 variant (CLAUDE_CONFIG_DIR at the mirrored config root), on both bird

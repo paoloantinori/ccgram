@@ -1,5 +1,7 @@
 # Cover the renamed saved name in the upload notification test
 
+Status: done (test coverage present in tests/ccgram/handlers/test_file_handler.py)
+
 From greptile-apps[bot] (P2) on alexei-led/ccgram#296, merged 2026-10-03
 as aabbbe5b by alexei-led: TestUploadNotifiesAbsolutePath mocks
 _download_and_save to return "a.txt" while the requested filename is

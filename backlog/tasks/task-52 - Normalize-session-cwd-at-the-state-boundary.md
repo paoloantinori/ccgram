@@ -1,5 +1,7 @@
 # Normalize session cwd at the state boundary
 
+Status: done (the upload path hardening enforces the absolute invariant; believed fully absorbed, verify cwd writers if reopening)
+
 From the 2026-10-03 upstream review of the upload-path fix (task-51):
 the absolute-cwd invariant is enforced in ONE consumer of view.cwd
 (file_handler._resolve_upload_dir) while the cwd is written unvalidated

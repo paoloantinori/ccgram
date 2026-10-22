@@ -1,5 +1,7 @@
 # Agent misreads relative upload path as "image never arrived"
 
+Status: done (merged upstream as #296 with attribution; the isprintable overreach fixed in-tree 2026-10-13)
+
 Reported 2026-10-03 by the maintainer ("Fixa questo sul Mac"): a photo
 sent to the Mac anti-vocale topic was reported by the av-mac agent as
 never arrived, with the claim that the Mac bridge "is text-only and does

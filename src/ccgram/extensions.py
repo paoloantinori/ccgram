@@ -59,9 +59,10 @@ class ExtensionApi:
         """
         command = getattr(handler, "commands", None)
         if command:
-            # Lazy: registry pulls the whole handler tree; the seam stays
-            # import-light for its standalone importers (tests,
-            # thread_router) even though bot.py loads registry anyway.
+            # Lazy: registry pulls the whole handler tree. Hoisting
+            # would break the from-extensions importers (thread_router,
+            # message_queue import emit) with a partially initialized
+            # module; keep the seam import-light.
             from .handlers.registry import COMMAND_NAMES
 
             for name in command:
@@ -102,7 +103,7 @@ def load_extensions(add_handler: Callable[[BaseHandler], None]) -> int:
             count += 1
             logger.info("extension loaded:", extension=ep.name)
         except Exception:  # noqa: BLE001  # one bad package never blocks boot
-            logger.exception("extension failed to load: %s", ep.name)
+            logger.exception("extension failed to load", extension=ep.name)
     if count == 0:
         logger.warning(
             "no extensions loaded: a plain install dropped ccgram-ext; "
@@ -136,7 +137,7 @@ def emit(event: str, **payload: Any) -> None:
                 # ensure_future takes any Awaitable (create_task does not).
                 asyncio.ensure_future(result)
         except Exception:  # noqa: BLE001  # listener bugs never block emit
-            logger.warning("extension listener failed: %s", event, exc_info=True)
+            logger.warning("extension listener failed", event=event, exc_info=True)
 
 
 def reset_for_testing() -> None:

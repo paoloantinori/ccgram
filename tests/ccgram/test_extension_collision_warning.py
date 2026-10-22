@@ -75,3 +75,12 @@ def test_group0_callback_handler_logs_a_warning():
     ]
     assert takeover, "a total callback takeover must be called out"
     assert takeover[0]["extension"] == "test-ext"
+
+
+def test_multi_command_handler_warns_per_matching_name():
+    api = _api()
+    with capture_logs() as logs:
+        api.register_ptb_handler(CommandHandler(["send", "names"], _noop), "message")
+
+    warned = {e["command"] for e in _shadow_warnings(logs)}
+    assert warned == {"send"}
