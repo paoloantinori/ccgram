@@ -1,6 +1,6 @@
 # Task 57: Warn when an extension registers a colliding handler
 
-Status: open
+Status: done (2026-10-22)
 Filed: 2026-10-18 (code-review finding on the task-56 fix)
 
 ## Problem
@@ -24,6 +24,21 @@ CommandHandler whose command name is one of the built-in command specs
 (registry.COMMAND_NAMES or equivalent), log a warning naming both sides.
 Keep it a warning, not a rejection: extensions are the user's own and may
 deliberately override.
+
+## Resolution (2026-10-22)
+
+register_ptb_handler warns (never rejects, per the seam isolation
+contract) naming the extension and the command. Review hardening folded
+in the same commit: COMMAND_NAMES now derives from the hoisted
+COMMAND_SPECS table (a production guard no longer depends on a test
+sentinel), the warning carries the extension name, a group-0
+CallbackQueryHandler through the seam also warns (core installs exactly
+one unfiltered callback dispatcher; an extension one, registered first,
+would deaden every core inline keyboard), extensions.py moved to
+structlog (the %-style "extension loaded" line now keeps its name in the
+record while preserving the deploy-contract grep string), and the lazy
+import comment states the real reason (the seam's own import-lightness,
+not bot.py's cold start).
 
 ## Acceptance
 

@@ -94,33 +94,7 @@ def register_all(
     explicit CommandHandlers must precede the COMMAND-fallback
     MessageHandler, which must precede the TEXT MessageHandler.
     """
-    command_specs: list[CommandSpec] = [
-        CommandSpec("start", new_command),
-        CommandSpec("history", history_command),
-        CommandSpec("commands", commands_command),
-        CommandSpec("sessions", sessions_command),
-        CommandSpec("dashboard", dashboard_command),
-        CommandSpec("resume", resume_command),
-        CommandSpec("unbind", unbind_command),
-        CommandSpec("rollback", rollback_command),
-        CommandSpec("upgrade", upgrade_command),
-        CommandSpec("recall", recall_command),
-        CommandSpec("screenshot", screenshot_command),
-        CommandSpec("live", live_command),
-        CommandSpec("panes", panes_command),
-        CommandSpec("split", split_command),
-        CommandSpec("sync", sync_command),
-        CommandSpec("toolbar", toolbar_command),
-        CommandSpec("send", send_command),
-        CommandSpec("verbose", verbose_command),
-        CommandSpec("toolcalls", toolcalls_command),
-        CommandSpec("restore", restore_command),
-        CommandSpec("last", last_command),
-        CommandSpec("agent", agent_command),
-        CommandSpec("provider", agent_command),  # alias
-    ]
-
-    for spec in command_specs:
+    for spec in COMMAND_SPECS:
         application.add_handler(
             CommandHandler(spec.name, spec.handler, filters=group_filter)
         )
@@ -185,29 +159,34 @@ def register_all(
     application.add_handler(InlineQueryHandler(inline_query_handler))
 
 
-COMMAND_NAMES: tuple[str, ...] = (
-    "start",
-    "history",
-    "commands",
-    "sessions",
-    "dashboard",
-    "resume",
-    "unbind",
-    "rollback",
-    "upgrade",
-    "recall",
-    "screenshot",
-    "live",
-    "panes",
-    "split",
-    "sync",
-    "toolbar",
-    "send",
-    "verbose",
-    "toolcalls",
-    "restore",
-    "last",
-    "agent",
-    "provider",
+# The authoritative command table: register_all installs exactly these,
+# in order. COMMAND_NAMES derives from it (single source of truth; the
+# extension seam's shadow warning reads it as a production surface).
+COMMAND_SPECS: tuple[CommandSpec, ...] = (
+    CommandSpec("start", new_command),
+    CommandSpec("history", history_command),
+    CommandSpec("commands", commands_command),
+    CommandSpec("sessions", sessions_command),
+    CommandSpec("dashboard", dashboard_command),
+    CommandSpec("resume", resume_command),
+    CommandSpec("unbind", unbind_command),
+    CommandSpec("rollback", rollback_command),
+    CommandSpec("upgrade", upgrade_command),
+    CommandSpec("recall", recall_command),
+    CommandSpec("screenshot", screenshot_command),
+    CommandSpec("live", live_command),
+    CommandSpec("panes", panes_command),
+    CommandSpec("split", split_command),
+    CommandSpec("sync", sync_command),
+    CommandSpec("toolbar", toolbar_command),
+    CommandSpec("send", send_command),
+    CommandSpec("verbose", verbose_command),
+    CommandSpec("toolcalls", toolcalls_command),
+    CommandSpec("restore", restore_command),
+    CommandSpec("last", last_command),
+    CommandSpec("agent", agent_command),
+    CommandSpec("provider", agent_command),  # alias
 )
-"""Sentinel for tests: the exact command names register_all installs, in order."""
+
+COMMAND_NAMES: tuple[str, ...] = tuple(spec.name for spec in COMMAND_SPECS)
+"""The exact command names register_all installs, in order (derived)."""

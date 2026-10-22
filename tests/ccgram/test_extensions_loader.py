@@ -1,17 +1,18 @@
 """Extension loader: the zero-extension warning is the dropped-ext alarm."""
 
-import logging
+from structlog.testing import capture_logs
 
 from ccgram import extensions
 
 
-def test_load_extensions_warns_when_none_installed(caplog):
-    with caplog.at_level(logging.WARNING, logger="ccgram.extensions"):
+def test_load_extensions_warns_when_none_installed():
+    with capture_logs() as logs:
         count = extensions.load_extensions(lambda _handler: None)
+    warned = [e for e in logs if "no extensions loaded" in str(e.get("event", ""))]
     if count == 0:
-        assert any("no extensions loaded" in r.message for r in caplog.records)
+        assert warned
     else:
-        assert not any("no extensions loaded" in r.message for r in caplog.records)
+        assert not warned
 
 
 def test_load_extensions_returns_nonnegative_count():

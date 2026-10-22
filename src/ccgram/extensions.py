@@ -19,13 +19,13 @@ from __future__ import annotations
 
 import asyncio
 import inspect
-import logging
 from importlib.metadata import entry_points
 from typing import Any, Callable
 
-from telegram.ext import BaseHandler
+import structlog
+from telegram.ext import BaseHandler, CallbackQueryHandler
 
-logger = logging.getLogger(__name__)
+logger = structlog.get_logger()
 
 ENTRY_POINT_GROUP = "ccgram.extensions"
 
@@ -38,15 +38,48 @@ _listeners: dict[str, list[Listener]] = {}
 class ExtensionApi:
     """The registration surface handed to each extension."""
 
-    def __init__(self, add_handler: Callable[[BaseHandler], None]) -> None:
+    def __init__(
+        self,
+        add_handler: Callable[[BaseHandler], None],
+        name: str = "",
+    ) -> None:
         self._add_handler = add_handler
+        self._name = name
 
     def register_ptb_handler(self, handler: BaseHandler, update_type: str) -> None:
         """Register a PTB handler and claim its update type.
 
         ``update_type`` lands in ``allowed_updates`` (run_polling filters
         to the listed types, so an unlisted handler would never fire).
+        Extensions register BEFORE the built-ins (task-56: PTB keeps one
+        handler per group, first registered wins), so a CommandHandler
+        using a built-in name silently kills the core command in every
+        chat. Warn, do not reject: extensions are the maintainer's own
+        and may deliberately override (task-57).
         """
+        command = getattr(handler, "commands", None)
+        if command:
+            # Lazy: registry pulls the whole handler tree; the seam stays
+            # import-light for its standalone importers (tests,
+            # thread_router) even though bot.py loads registry anyway.
+            from .handlers.registry import COMMAND_NAMES
+
+            for name in command:
+                if name in COMMAND_NAMES:
+                    logger.warning(
+                        "extension shadows the built-in command",
+                        extension=self._name or "<unknown>",
+                        command=name,
+                        handler=type(handler).__name__,
+                    )
+        elif isinstance(handler, CallbackQueryHandler):
+            # Core installs exactly one unfiltered CallbackQueryHandler in
+            # group 0; an extension one, registered first, would capture
+            # every callback query and deaden all core inline keyboards.
+            logger.warning(
+                "extension registers a group-0 callback-query handler",
+                extension=self._name or "<unknown>",
+            )
         self._add_handler(handler)
         _registered_update_types.add(update_type)
 
@@ -65,9 +98,9 @@ def load_extensions(add_handler: Callable[[BaseHandler], None]) -> int:
     for ep in entry_points(group=ENTRY_POINT_GROUP):
         try:
             register = ep.load()
-            register(ExtensionApi(add_handler))
+            register(ExtensionApi(add_handler, name=ep.name))
             count += 1
-            logger.info("extension loaded: %s", ep.name)
+            logger.info("extension loaded:", extension=ep.name)
         except Exception:  # noqa: BLE001  # one bad package never blocks boot
             logger.exception("extension failed to load: %s", ep.name)
     if count == 0:
