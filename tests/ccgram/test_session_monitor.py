@@ -1331,6 +1331,72 @@ class TestPerWindowProviderResolution:
         assert "@7" in captured_window_ids
 
 
+async def test_check_for_updates_auto_skips_over_cap_session(tmp_path) -> None:
+    """The wiring, not just the method: an over-cap session is not read.
+
+    The 2026-09 upstream merge dropped the discovery-loop hooks while the
+    skip machinery survived; unit tests on _maybe_auto_backlog_skip alone
+    would have stayed green. This test fails if either the hooks or the
+    method disappear (task-60 regression guard).
+    """
+    from types import SimpleNamespace
+
+    import ccgram.session_monitor as sm_mod
+    import ccgram.thread_router as tr_mod
+
+    session_file = tmp_path / "transcript.jsonl"
+    session_file.write_text("x" * 10_000)
+
+    monitor = SessionMonitor(
+        projects_path=tmp_path / "projects",
+        state_file=tmp_path / "ms.json",
+    )
+    monitor.state.update_session(
+        TrackedSession(
+            session_id="sess-big",
+            file_path=str(session_file),
+            last_byte_offset=0,
+        )
+    )
+
+    async def fake_skip(user_id, window_id, thread_id, chat_id):
+        return SimpleNamespace(skipped_count=7)
+
+    monitor.request_backlog_skip = fake_skip
+    router = SimpleNamespace(
+        iter_thread_bindings_with_chat=lambda: iter([(1, 10, 20, "@7")])
+    )
+    monkeypatched_router = tr_mod.thread_router
+    tr_mod.thread_router = router
+    try:
+        original_cap = sm_mod._REPLAY_CAP_BYTES
+        sm_mod._REPLAY_CAP_BYTES = 1_000
+        read_session_ids = []
+        original_process = monitor._process_session_file
+
+        async def spy(session_id, file_path, new_messages, window_id=""):
+            read_session_ids.append(session_id)
+            return await original_process(
+                session_id, file_path, new_messages, window_id=window_id
+            )
+
+        monitor._process_session_file = spy
+        current_map = {
+            "@7": {
+                "session_id": "sess-big",
+                "cwd": "/proj",
+                "window_name": "proj",
+                "transcript_path": str(session_file),
+            },
+        }
+        await monitor.check_for_updates(current_map)
+    finally:
+        sm_mod._REPLAY_CAP_BYTES = original_cap
+        tr_mod.thread_router = monkeypatched_router
+
+    assert "sess-big" not in read_session_ids
+
+
 class TestReadNewLines:
     async def test_shrunken_file_resumes_from_eof_no_replay(self, tmp_path) -> None:
         """Shrunken/replaced transcripts must not be replayed (2026-08-17
@@ -2273,3 +2339,125 @@ class TestActiveCwdsUseTheCompleteListing:
         )
 
         assert await self._reader()._get_active_cwds() == set()
+
+
+class TestAutoBacklogSkip:
+    async def test_gap_over_cap_triggers_skip(self, monkeypatch, tmp_path):
+        import ccgram.session_monitor as sm_mod
+        from types import SimpleNamespace
+
+        calls = []
+        monitor = sm_mod.SessionMonitor.__new__(sm_mod.SessionMonitor)
+        monitor._auto_skip_retry_at = {}
+
+        async def fake_skip(user_id, window_id, thread_id, chat_id):
+            calls.append((user_id, window_id, thread_id, chat_id))
+            return SimpleNamespace()
+
+        object.__setattr__(monitor, "request_backlog_skip", fake_skip)
+        big = tmp_path / "big.jsonl"
+        big.write_text("x" * 100)
+        fake_state = SimpleNamespace(
+            pending_skips=set(),
+            get_session=lambda sid: SimpleNamespace(last_byte_offset=10),
+        )
+        object.__setattr__(monitor, "state", fake_state)
+        monkeypatch.setattr(sm_mod, "_REPLAY_CAP_BYTES", 50)
+        router = SimpleNamespace(
+            iter_thread_bindings_with_chat=lambda: iter([(1, 10, 20, "wA")])
+        )
+        import ccgram.thread_router as tr_mod
+
+        monkeypatch.setattr(tr_mod, "thread_router", router)
+        assert await monitor._maybe_auto_backlog_skip("s", big, "wA") is True
+        assert calls == [(1, "wA", 20, 10)]
+
+    async def test_small_gap_reads_normally(self, monkeypatch, tmp_path):
+        import ccgram.session_monitor as sm_mod
+        from types import SimpleNamespace
+
+        monitor = sm_mod.SessionMonitor.__new__(sm_mod.SessionMonitor)
+        monitor._auto_skip_retry_at = {}
+        f = tmp_path / "s.jsonl"
+        f.write_text("x" * 10)
+        object.__setattr__(
+            monitor,
+            "state",
+            SimpleNamespace(
+                pending_skips=set(),
+                get_session=lambda sid: SimpleNamespace(last_byte_offset=0),
+            ),
+        )
+        monkeypatch.setattr(sm_mod, "_REPLAY_CAP_BYTES", 1_000_000)
+        assert await monitor._maybe_auto_backlog_skip("s", f, "wA") is False
+
+    async def test_unbound_window_never_skips(self, monkeypatch, tmp_path):
+        import ccgram.session_monitor as sm_mod
+        from types import SimpleNamespace
+
+        monitor = sm_mod.SessionMonitor.__new__(sm_mod.SessionMonitor)
+        monitor._auto_skip_retry_at = {}
+        f = tmp_path / "s.jsonl"
+        f.write_text("x" * 100)
+        object.__setattr__(
+            monitor,
+            "state",
+            SimpleNamespace(
+                pending_skips=set(),
+                get_session=lambda sid: SimpleNamespace(last_byte_offset=0),
+            ),
+        )
+        monkeypatch.setattr(sm_mod, "_REPLAY_CAP_BYTES", 50)
+        router = SimpleNamespace(iter_thread_bindings_with_chat=lambda: iter([]))
+        import ccgram.thread_router as tr_mod
+
+        monkeypatch.setattr(tr_mod, "thread_router", router)
+        assert await monitor._maybe_auto_backlog_skip("s", f, "wA") is False
+
+
+class TestAutoBacklogSkipGuards:
+    async def test_failed_intent_does_not_silence(self, monkeypatch, tmp_path):
+        import ccgram.session_monitor as sm_mod
+        from types import SimpleNamespace
+
+        monitor = sm_mod.SessionMonitor.__new__(sm_mod.SessionMonitor)
+        monitor._auto_skip_retry_at = {}
+
+        async def failing_skip(user_id, window_id, thread_id, chat_id):
+            return None
+
+        object.__setattr__(monitor, "request_backlog_skip", failing_skip)
+        f = tmp_path / "s.jsonl"
+        f.write_text("x" * 100)
+        object.__setattr__(
+            monitor,
+            "state",
+            SimpleNamespace(
+                pending_skips=set(),
+                get_session=lambda sid: SimpleNamespace(last_byte_offset=0),
+            ),
+        )
+        monkeypatch.setattr(sm_mod, "_REPLAY_CAP_BYTES", 50)
+        import ccgram.thread_router as tr_mod
+
+        monkeypatch.setattr(
+            tr_mod,
+            "thread_router",
+            SimpleNamespace(
+                iter_thread_bindings_with_chat=lambda: iter([(1, 10, 20, "wA")])
+            ),
+        )
+        # No barrier persisted: the session must be read normally.
+        assert await monitor._maybe_auto_backlog_skip("s", f, "wA") is False
+
+    async def test_negative_cap_is_disabled(self, monkeypatch, tmp_path):
+        import ccgram.session_monitor as sm_mod
+        from types import SimpleNamespace
+
+        monkeypatch.setattr(sm_mod, "_REPLAY_CAP_BYTES", -1)
+        monitor = sm_mod.SessionMonitor.__new__(sm_mod.SessionMonitor)
+        monitor._auto_skip_retry_at = {}
+        object.__setattr__(monitor, "state", SimpleNamespace(pending_skips=set()))
+        f = tmp_path / "s.jsonl"
+        f.write_text("x")
+        assert await monitor._maybe_auto_backlog_skip("s", f, "w") is False

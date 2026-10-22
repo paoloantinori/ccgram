@@ -76,6 +76,23 @@ def _delivery_watch_gap_bytes() -> int:
         return 256 * 1024
 
 
+def _replay_cap_bytes() -> int:
+    """Automatic replay-cap threshold in bytes, floored at 0 (disable) and
+    tolerant of empty or non-numeric input so a bad env value cannot break
+    startup. Beyond this unsettled per-session gap the monitor skips the
+    backlog automatically (TASK-60)."""
+    try:
+        value = float(os.getenv("CCGRAM_REPLAY_CAP_MB") or 1.0)
+    except ValueError:
+        return 1_000_000
+    if not math.isfinite(value):
+        return 1_000_000
+    try:
+        return max(0, int(value * 1_000_000))
+    except OverflowError, ValueError:
+        return 1_000_000
+
+
 def _whisper_timeout_s() -> float:
     """Seconds before the transcription POST gives up, floored at 1s and
     tolerant of empty, non-numeric, or non-finite input (inf would disable
@@ -150,6 +167,7 @@ class Config:
         )
         self.skip_barrier_deadline_s = _skip_barrier_deadline_s()
         self.delivery_watch_gap_bytes = _delivery_watch_gap_bytes()
+        self.replay_cap_bytes = _replay_cap_bytes()
 
         # Multi-instance support
         group_id_str = os.getenv("CCGRAM_GROUP_ID")

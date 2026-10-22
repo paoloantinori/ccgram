@@ -77,6 +77,15 @@ _BACKOFF_MIN = 2.0
 _BACKOFF_MAX = 30.0
 _SKIP_RETRY_BASE_SECONDS = 2.0
 _SKIP_RETRY_MAX_SECONDS = 60.0
+# TASK-60: automatic replay cap (restored; lost in the 2026-09 upstream
+# wave that reshaped this file, found by the 2026-10-19 incident). Beyond
+# this unsettled gap the upstream skip barrier fires automatically; the
+# manual status-bar button alone dies with the very outage it cures, its
+# channel is starved too (2026-09-06 incident). Knob:
+# config.replay_cap_bytes (CCGRAM_REPLAY_CAP_MB, 0 disables).
+_REPLAY_CAP_BYTES = config.replay_cap_bytes
+# Damp auto-skip retries for sessions whose barrier cannot resolve yet.
+_AUTO_SKIP_RETRY_SECONDS = 10.0
 _MSG_PREVIEW_LENGTH = 80
 
 logger = structlog.get_logger()
@@ -107,6 +116,7 @@ class SessionMonitor:
         poll_interval: float | None = None,
         state_file: Path | None = None,
     ):
+        self._auto_skip_retry_at: dict[str, float] = {}
         self.projects_path = (
             projects_path if projects_path is not None else config.claude_projects_path
         )
@@ -596,6 +606,10 @@ class SessionMonitor:
         for session_id, file_path in direct_sessions:
             if session_id in self.state.pending_skips:
                 continue
+            if await self._maybe_auto_backlog_skip(
+                session_id, file_path, sid_to_wid.get(session_id, "")
+            ):
+                continue
             try:
                 await self._process_session_file(
                     session_id,
@@ -615,6 +629,12 @@ class SessionMonitor:
                     or session_info.session_id in self.state.pending_skips
                 ):
                     continue
+                if await self._maybe_auto_backlog_skip(
+                    session_info.session_id,
+                    session_info.file_path,
+                    sid_to_wid.get(session_info.session_id, ""),
+                ):
+                    continue
                 try:
                     await self._process_session_file(
                         session_info.session_id,
@@ -629,6 +649,67 @@ class SessionMonitor:
 
         self.state.save_if_dirty()
         return new_messages
+
+    async def _maybe_auto_backlog_skip(
+        self, session_id: str, file_path: Path, window_id: str
+    ) -> bool:
+        """Auto-trigger the upstream skip barrier when the gap exceeds the cap.
+
+        Returns True when the session is (now) under a skip barrier and
+        must not be read this cycle. Resolution of (user, chat, thread)
+        comes from the bound topic; an unbound session is left alone.
+        """
+        # Lazy: thread_router is wired into session_manager which imports
+        # session_monitor; hoisting forms a startup cycle.
+        from .thread_router import thread_router
+
+        if not _REPLAY_CAP_BYTES or not window_id:
+            return False
+        if session_id in self.state.pending_skips:
+            return True
+        now = time.monotonic()
+        if now < self._auto_skip_retry_at.get(session_id, 0.0):
+            return False
+        try:
+            session = self.state.get_session(session_id)
+            if session is None:
+                return False
+            gap = file_path.stat().st_size - session.last_byte_offset
+            if gap <= _REPLAY_CAP_BYTES:
+                return False
+            for (
+                user_id,
+                chat_id,
+                thread_id,
+                bound_window,
+            ) in thread_router.iter_thread_bindings_with_chat():
+                if bound_window != window_id or chat_id is None:
+                    continue
+                intent = await self.request_backlog_skip(
+                    user_id, window_id, thread_id, chat_id
+                )
+                if intent is not None:
+                    logger.warning(
+                        "auto backlog skip: %s gap %.1fMB exceeds cap %.1fMB",
+                        session_id,
+                        gap / 1e6,
+                        _REPLAY_CAP_BYTES / 1e6,
+                    )
+                # Only claim the skip when a barrier actually exists: a
+                # None intent (unresolvable session, stat race) must not
+                # silence the topic with neither barrier nor notice.
+                # Damp the automatic retries: without this, an
+                # unresolvable over-cap session would re-attempt (and
+                # re-write the state file) every poll cycle.
+                if intent is None:
+                    self._auto_skip_retry_at[session_id] = (
+                        time.monotonic() + _AUTO_SKIP_RETRY_SECONDS
+                    )
+                return intent is not None or (session_id in self.state.pending_skips)
+            return False
+        except Exception:  # noqa: BLE001  # never break the poll loop
+            logger.exception("auto backlog skip check failed for %s", session_id)
+            return False
 
     async def _process_session_file(
         self, session_id: str, file_path: Path, new_messages: list, window_id: str = ""
