@@ -61,6 +61,27 @@ fails the battery. env values live: bird=16, mac=16 MB. Maintainer
 note: 16 tolerates hours of wedge before skipping; the September
 default was 1 (minutes). Lowering is one .env edit + restart.
 
+## Code-review round (2026-10-22), all closed additively
+
+- Vacuous disable test replaced (cap=0 reachable value, guard-path
+  proven by a get_session that would explode if reached).
+- The is-False unit tests now assert no swallowed probe exception
+  (the broad except was also returning False).
+- Wiring tests extended: cap=0 still reads (loop not gated).
+- _auto_skip_retry_at evicted with the sibling retry dicts on session
+  discard (unbounded growth on long-lived bridges).
+- Bindings without a recorded chat id resolve it via
+  resolve_chat_id instead of permanently exempting the session.
+- Docstring contract fixed (False when cap disabled or window unbound).
+- Accepted trade-offs, no change: a live session out-pacing delivery
+  past the cap gets its queued tail skipped with one notice (liveness
+  over completeness, the knob the maintainer just set to 4MB); the
+  fallback loop can measure the scanned file while the barrier
+  snapshots the tracked one (bounded to a refused skip by the
+  regressed-EOF guard).
+- env: both bridges now CCGRAM_REPLAY_CAP_MB=4 (user-approved, backups
+  .env.bak.* on each machine).
+
 ## Acceptance
 
 - A session loaded with a gap above the cap auto-skips at discovery with

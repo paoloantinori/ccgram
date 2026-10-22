@@ -310,6 +310,7 @@ class SessionMonitor:
     def _clear_skip_retry(self, session_id: str) -> None:
         self._skip_retry_attempts.pop(session_id, None)
         self._skip_retry_at.pop(session_id, None)
+        self._auto_skip_retry_at.pop(session_id, None)
 
     async def _prepare_pending_skip(self, intent: BacklogSkipIntent) -> bool | None:
         """Retire frozen source work before a skip notice may be sent."""
@@ -656,8 +657,11 @@ class SessionMonitor:
         """Auto-trigger the upstream skip barrier when the gap exceeds the cap.
 
         Returns True when the session is (now) under a skip barrier and
-        must not be read this cycle. Resolution of (user, chat, thread)
-        comes from the bound topic; an unbound session is left alone.
+        must not be read this cycle; False otherwise. With the cap
+        disabled or no window bound the answer is always False, even for
+        a barrier-pending session (check_for_updates pre-filters those).
+        Resolution of (user, chat, thread) comes from the bound topic; an
+        unbound session is left alone.
         """
         # Lazy: thread_router is wired into session_manager which imports
         # session_monitor; hoisting forms a startup cycle.
@@ -683,8 +687,15 @@ class SessionMonitor:
                 thread_id,
                 bound_window,
             ) in thread_router.iter_thread_bindings_with_chat():
-                if bound_window != window_id or chat_id is None:
+                if bound_window != window_id:
                     continue
+                if chat_id is None:
+                    # Legacy bindings can lack the recorded group chat id
+                    # (pre-migration state); resolve it the way bootstrap
+                    # does instead of permanently exempting the session.
+                    chat_id = thread_router.resolve_chat_id(user_id, thread_id)
+                    if chat_id is None:
+                        continue
                 intent = await self.request_backlog_skip(
                     user_id, window_id, thread_id, chat_id
                 )

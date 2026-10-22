@@ -5,6 +5,8 @@ import json
 import os
 import time
 from types import SimpleNamespace
+
+from structlog.testing import capture_logs
 from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
@@ -1397,6 +1399,51 @@ async def test_check_for_updates_auto_skips_over_cap_session(tmp_path) -> None:
     assert "sess-big" not in read_session_ids
 
 
+async def test_check_for_updates_zero_cap_still_reads(tmp_path) -> None:
+    """Cap=0 (disabled) must not gate the discovery loop (wiring level)."""
+    import ccgram.session_monitor as sm_mod
+
+    session_file = tmp_path / "transcript.jsonl"
+    session_file.write_text("x" * 10_000)
+    monitor = SessionMonitor(
+        projects_path=tmp_path / "projects",
+        state_file=tmp_path / "ms.json",
+    )
+    monitor.state.update_session(
+        TrackedSession(
+            session_id="sess-ok",
+            file_path=str(session_file),
+            last_byte_offset=0,
+        )
+    )
+    read_session_ids = []
+    original_process = monitor._process_session_file
+
+    async def spy(session_id, file_path, new_messages, window_id=""):
+        read_session_ids.append(session_id)
+        return await original_process(
+            session_id, file_path, new_messages, window_id=window_id
+        )
+
+    monitor._process_session_file = spy
+    original_cap = sm_mod._REPLAY_CAP_BYTES
+    sm_mod._REPLAY_CAP_BYTES = 0
+    try:
+        current_map = {
+            "@7": {
+                "session_id": "sess-ok",
+                "cwd": "/proj",
+                "window_name": "proj",
+                "transcript_path": str(session_file),
+            },
+        }
+        await monitor.check_for_updates(current_map)
+    finally:
+        sm_mod._REPLAY_CAP_BYTES = original_cap
+
+    assert "sess-ok" in read_session_ids
+
+
 class TestReadNewLines:
     async def test_shrunken_file_resumes_from_eof_no_replay(self, tmp_path) -> None:
         """Shrunken/replaced transcripts must not be replayed (2026-08-17
@@ -2389,7 +2436,9 @@ class TestAutoBacklogSkip:
             ),
         )
         monkeypatch.setattr(sm_mod, "_REPLAY_CAP_BYTES", 1_000_000)
-        assert await monitor._maybe_auto_backlog_skip("s", f, "wA") is False
+        with capture_logs() as logs:
+            assert await monitor._maybe_auto_backlog_skip("s", f, "wA") is False
+        assert not [e for e in logs if "auto backlog skip check failed" in str(e)]
 
     async def test_unbound_window_never_skips(self, monkeypatch, tmp_path):
         import ccgram.session_monitor as sm_mod
@@ -2412,7 +2461,9 @@ class TestAutoBacklogSkip:
         import ccgram.thread_router as tr_mod
 
         monkeypatch.setattr(tr_mod, "thread_router", router)
-        assert await monitor._maybe_auto_backlog_skip("s", f, "wA") is False
+        with capture_logs() as logs:
+            assert await monitor._maybe_auto_backlog_skip("s", f, "wA") is False
+        assert not [e for e in logs if "auto backlog skip check failed" in str(e)]
 
 
 class TestAutoBacklogSkipGuards:
@@ -2448,16 +2499,23 @@ class TestAutoBacklogSkipGuards:
             ),
         )
         # No barrier persisted: the session must be read normally.
-        assert await monitor._maybe_auto_backlog_skip("s", f, "wA") is False
+        with capture_logs() as logs:
+            assert await monitor._maybe_auto_backlog_skip("s", f, "wA") is False
+        assert not [e for e in logs if "auto backlog skip check failed" in str(e)]
 
-    async def test_negative_cap_is_disabled(self, monkeypatch, tmp_path):
+    async def test_zero_cap_is_disabled(self, monkeypatch, tmp_path):
+        """Cap=0 must disable via the guard, not via a swallowed error."""
         import ccgram.session_monitor as sm_mod
         from types import SimpleNamespace
 
-        monkeypatch.setattr(sm_mod, "_REPLAY_CAP_BYTES", -1)
+        monkeypatch.setattr(sm_mod, "_REPLAY_CAP_BYTES", 0)
         monitor = sm_mod.SessionMonitor.__new__(sm_mod.SessionMonitor)
         monitor._auto_skip_retry_at = {}
-        object.__setattr__(monitor, "state", SimpleNamespace(pending_skips=set()))
+        # get_session would explode if reached: with cap=0 the guard must
+        # return False BEFORE any state access.
+        object.__setattr__(
+            monitor, "state", SimpleNamespace(pending_skips=set(), get_session=None)
+        )
         f = tmp_path / "s.jsonl"
         f.write_text("x")
         assert await monitor._maybe_auto_backlog_skip("s", f, "w") is False
