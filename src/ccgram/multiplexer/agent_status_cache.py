@@ -1,13 +1,10 @@
-"""Backend-neutral agent-status cache: push-written, probe-populated.
+"""Backend-neutral push-updated agent-status cache.
 
 The herdr event-stream consumer writes the latest native ``AgentStatus`` per
-window here; the status-polling layer (``observe._native_status_or_probe``)
-reads it, and on backends without a push stream the probe-only callers
-populate it directly (positives pass through uncached, negatives are cached
-for the short pass-through TTL). This bridges the push stream and the
-existing poll loop (the "augment" reconcile): push keeps the cache fresh,
-the poll reads it, and a one-shot subprocess ``agent_status()`` is the
-cold-cache fallback.
+window here; Telegram status polling and shared-core bulk refreshes read it
+instead of repeating native probes. On backends without a push stream, optional
+status enrichment caches only negative probe results briefly and leaves positive
+results live so transitions remain visible.
 
 Pure module — depends only on the seam value type (``AgentStatus``), never on a
 concrete backend, so the polling layer can import it without crossing the F1
@@ -29,9 +26,6 @@ logger = logging.getLogger(__name__)
 
 _NEGATIVE_TTL = 15.0
 _POSITIVE_TTL = 90.0
-# A cache_positive=False caller has no push stream to bypass a stale
-# negative entry, and its whole freshness budget is this TTL, so keep it
-# to a few poll ticks instead of the push-tuned negative TTL.
 _PASS_THROUGH_NEGATIVE_TTL = 5.0
 
 
@@ -117,7 +111,6 @@ def _store_entry(window_id: str, entry: _CacheEntry) -> None:
 def _entry_for_probe_result(
     result: AgentStatus | None, cache_positive: bool
 ) -> _CacheEntry | None:
-    """The entry a probe result may store, or None for pass-through."""
     if result is None:
         ttl = _NEGATIVE_TTL if cache_positive else _PASS_THROUGH_NEGATIVE_TTL
         return _CacheEntry(None, _clock() + ttl)
@@ -146,17 +139,13 @@ async def get_status_or_probe(
 ) -> AgentStatus | None:
     """Read a fresh cache entry, probing once on a miss.
 
-    Pushed and successful probe results expire after 90 seconds; each push
-    refreshes that TTL. Empty probe results are cached for 15 seconds.
-    Concurrent callers share a probe. A newer push wins over a probe already
-    in flight, and clear/reset invalidates an older probe even when the cache
-    was cold at invalidation.
-
-    With ``cache_positive=False`` positive answers pass through uncached
-    and cached positive entries are treated as misses: a caller with no
-    push stream to refresh them must not trust a possibly stale positive.
-    Negative answers are kept for the shorter pass-through TTL, because
-    no push can bypass a stale negative for that caller either.
+    By default, pushed and successful probe results expire after 90 seconds;
+    each push refreshes that TTL. Empty probe results are cached for 15 seconds.
+    Callers without a push stream can set ``cache_positive=False``: positive
+    results then pass through live, while empty results are cached for five
+    seconds. Concurrent callers share a probe. A newer push wins over a probe
+    already in flight, and clear/reset invalidates an older probe even when the
+    cache was cold at invalidation.
     """
     hit, status = _get_entry(window_id)
     if hit and (status is None or cache_positive):
@@ -211,8 +200,8 @@ async def get_status_or_probe(
         if entry is not None:
             _store_entry(window_id, entry)
             _bump_generation(window_id)
-        # A pass-through stores nothing and reports no newer event, so
-        # co-waiters on the same probe keep the result they awaited.
+        # A pass-through positive is still shared by current co-waiters, but
+        # does not become a stale cache entry or a newer generation.
         return result
     finally:
         _release_generation(window_id, state)

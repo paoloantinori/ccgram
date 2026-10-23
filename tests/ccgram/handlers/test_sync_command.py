@@ -2,7 +2,7 @@ import contextlib
 import asyncio
 import json
 from collections.abc import Callable
-from typing import Protocol
+from typing import Protocol, cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -27,6 +27,7 @@ from ccgram.handlers.sync_command import (
     sync_command,
 )
 from ccgram.handlers.topics.topic_deletion import cleanup_retired_topics
+from ccgram.session_protocol.telegram import TelegramSessionAdapter
 from ccgram.session import AuditIssue, AuditResult
 from ccgram.telegram_client import FakeTelegramClient
 from ccgram.telegram_rate_limiter import NO_RETRY_RATE_LIMIT_ARGS
@@ -50,6 +51,10 @@ def _patch_deps():
             "ccgram.handlers.topics.topic_orchestration.tmux_manager"
         ) as mock_tm_topics,
         patch("ccgram.handlers.sync_command.config") as mock_cfg,
+        patch(
+            "ccgram.handlers.sync_command.adapter_for",
+            side_effect=lambda _bot_data: _test_adapter(),
+        ),
     ):
         mock_sm.audit_state.return_value = AuditResult(
             issues=[], total_bindings=0, live_binding_count=0
@@ -67,6 +72,10 @@ def _patch_deps():
         mock_listing.return_value = []
         mock_cfg.is_user_allowed.return_value = True
         yield mock_sm, mock_sms, mock_wq, mock_tr, mock_tm, mock_cfg
+
+
+def _test_adapter() -> TelegramSessionAdapter:
+    return cast(TelegramSessionAdapter, MagicMock(spec=TelegramSessionAdapter))
 
 
 def _audit(*issues: AuditIssue, total: int = 3, live: int = 3) -> AuditResult:
@@ -581,6 +590,32 @@ class TestSyncCommand:
             "You are not authorized", show_alert=True
         )
 
+    async def test_authorized_fix_callback_passes_core_adapter(
+        self, _patch_deps
+    ) -> None:
+        update = MagicMock()
+        update.effective_user = MagicMock(id=100)
+        update.callback_query = AsyncMock()
+        update.callback_query.data = CB_SYNC_FIX
+        context = MagicMock()
+        adapter = _test_adapter()
+
+        with (
+            patch(
+                "ccgram.handlers.sync_command.adapter_for",
+                return_value=adapter,
+            ) as resolve_adapter,
+            patch(
+                "ccgram.handlers.sync_command.handle_sync_fix",
+                new_callable=AsyncMock,
+            ) as fix,
+        ):
+            await _dispatch(update, context)
+
+        resolve_adapter.assert_called_once_with(context.bot_data)
+        fix.assert_awaited_once_with(update.callback_query, adapter)
+        update.callback_query.answer.assert_awaited_once_with("Running fix...")
+
     async def test_no_user_returns_early(self, _patch_deps) -> None:
         update = MagicMock()
         update.effective_user = None
@@ -994,7 +1029,7 @@ class TestSyncAutomaticCleanup:
             patch("ccgram.handlers.topics.topic_deletion.session_manager"),
         ):
             closed, manual, retired_outcomes = await _cleanup_stale_topics(
-                client, issues
+                client, issues, _test_adapter()
             )
 
         assert (closed, manual) == (0, 1)
@@ -1011,7 +1046,7 @@ class TestSyncFix:
         query = MagicMock()
 
         with patch("ccgram.handlers.sync_command.safe_edit") as mock_edit:
-            await handle_sync_fix(query)
+            await handle_sync_fix(query, _test_adapter())
 
         mock_sm.sync_display_names.assert_not_called()
         mock_sm.prune_stale_state.assert_not_called()
@@ -1042,7 +1077,7 @@ class TestSyncFix:
                 new_callable=AsyncMock,
             ) as mock_sync_topic_names,
         ):
-            await handle_sync_fix(query)
+            await handle_sync_fix(query, _test_adapter())
             mock_sm.sync_display_names.assert_called_once_with([])
             mock_sm.prune_stale_state.assert_called_once_with(set())
             mock_sms.prune_session_map.assert_called_once_with(set())
@@ -1077,7 +1112,7 @@ class TestSyncFix:
         query = MagicMock()
 
         with patch("ccgram.handlers.sync_command.safe_edit") as mock_edit:
-            await handle_sync_fix(query)
+            await handle_sync_fix(query, _test_adapter())
             assert "\u2705 Fixed 1 issue" in mock_edit.call_args[0][1]
 
     async def test_fix_closes_ghost_topics(self, _patch_deps) -> None:
@@ -1111,7 +1146,7 @@ class TestSyncFix:
                 return_value="deleted",
             ) as mock_retire,
         ):
-            await handle_sync_fix(query)
+            await handle_sync_fix(query, _test_adapter())
             mock_retire.assert_awaited_once()
             retire_args = mock_retire.call_args
             assert retire_args.args[1:] == (100, 42, "w2:t1")
@@ -1166,7 +1201,7 @@ class TestSyncFix:
                 return_value="failed",
             ) as mock_retire,
         ):
-            await handle_sync_fix(query)
+            await handle_sync_fix(query, _test_adapter())
             mock_retire.assert_awaited_once()
             retire_args = mock_retire.call_args
             assert retire_args.args[1:] == (100, 42, "w2:t1")
@@ -1208,7 +1243,7 @@ class TestSyncFix:
                 return_value="deleted",
             ) as mock_retire,
         ):
-            await handle_sync_fix(query)
+            await handle_sync_fix(query, _test_adapter())
             mock_bot.close_forum_topic.assert_not_called()
             mock_retire.assert_awaited_once()
             retire_args = mock_retire.call_args
@@ -1266,7 +1301,7 @@ class TestSyncFix:
                 new_callable=AsyncMock,
             ) as mock_handle,
         ):
-            await handle_sync_fix(query)
+            await handle_sync_fix(query, _test_adapter())
             mock_handle.assert_called_once()
             event = mock_handle.call_args[0][0]
             assert event.window_id == "w2:t5"
@@ -1311,7 +1346,7 @@ class TestSyncFix:
                 new_callable=AsyncMock,
             ) as mock_handle,
         ):
-            await handle_sync_fix(query)
+            await handle_sync_fix(query, _test_adapter())
 
         mock_handle.assert_not_called()
 
@@ -1372,7 +1407,7 @@ class TestSyncFix:
                 state["windows"] = b_left_scope
 
             mock_handle.side_effect = _create
-            await handle_sync_fix(query)
+            await handle_sync_fix(query, _test_adapter())
 
         adopted = [call[0][0].window_id for call in mock_handle.call_args_list]
         assert adopted == ["w2:tA"]
@@ -1408,7 +1443,7 @@ class TestSyncFix:
                 new_callable=AsyncMock,
             ) as mock_handle,
         ):
-            await handle_sync_fix(query)
+            await handle_sync_fix(query, _test_adapter())
 
         mock_handle.assert_not_called()
 
@@ -1859,7 +1894,7 @@ class TestSyncAuditSeparatesLivenessFromAdoption:
         ):
             mock_sm.audit_state.return_value = MagicMock(issues=[])
             with contextlib.suppress(Exception):
-                await handle_sync_fix(query)
+                await handle_sync_fix(query, _test_adapter())
 
             # The later stages are mocked out and can raise on their mocks; the
             # claim is about the audit call the fix path makes.
@@ -1900,7 +1935,7 @@ async def test_sync_does_not_send_live_topic_probes(_patch_deps, fix, count):
         patch("ccgram.handlers.sync_command.safe_edit", new_callable=AsyncMock) as edit,
     ):
         if fix:
-            await handle_sync_fix(query)
+            await handle_sync_fix(query, _test_adapter())
         else:
             await sync_command(update, MagicMock())
 

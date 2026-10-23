@@ -394,11 +394,29 @@ async def _cmd_sync(command_id: str, client: Any) -> dict:
         _run_audit,
     )
 
+    # Lazy: the session-core adapter resolves the live bound service.
+    from .session_protocol.service import LocalSessionService
+
+    # Lazy: adapter_for wraps the bound service for the cleanup path.
+    from .session_protocol.telegram import TelegramSessionAdapter, adapter_for
+
+    # Lazy: resolver is wired by SessionManager during bootstrap.
+    from .session_resolver import session_resolver
+
     audit = await _run_audit()
     if audit is None:
         return _result(command_id, "sync", False, "multiplexer unavailable")
     cleanup_issues = [*audit.issues, *_retired_topic_issues()]
-    closed, manual, retired = await _cleanup_stale_topics(client, cleanup_issues)
+    # The session core binds its service at bootstrap; the admin consumer
+    # runs in-process, so the adapter resolves from the live service.
+    adapter = (
+        adapter_for({"session_service": session_resolver._session_service})
+        if isinstance(session_resolver._session_service, LocalSessionService)
+        else TelegramSessionAdapter.__new__(TelegramSessionAdapter)
+    )
+    closed, manual, retired = await _cleanup_stale_topics(
+        client, cleanup_issues, adapter
+    )
     post_audit = await _run_audit()
     remaining = len(post_audit.issues) if post_audit is not None else -1
     retired_text = ", ".join(
