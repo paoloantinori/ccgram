@@ -87,18 +87,15 @@ async def _resolve_status(
     # One native-status resolution per tick, shared by the TASK-47 gates
     # and the gap-fill (probe-only backends would otherwise pay one
     # round-trip per consumer; TASK-54).
-    native_cache: list[AgentStatus | None] = []
+    native_value: AgentStatus | None = None
     native_resolved = False
 
     async def native_once() -> AgentStatus | None:
-        nonlocal native_resolved
+        nonlocal native_value, native_resolved
         if not native_resolved:
-            if not tmux_manager.capabilities.native_agent_status:
-                native_cache.append(None)
-            else:
-                native_cache.append(await _native_status_or_probe(window_id))
+            native_value = await _native_status_or_probe(window_id)
             native_resolved = True
-        return native_cache[0]
+        return native_value
 
     status = _parse_with_pyte(
         window_id,
@@ -152,6 +149,8 @@ async def _native_status_or_probe(window_id: str) -> AgentStatus | None:
     loop does not catch).
     """
     try:
+        if not tmux_manager.capabilities.native_agent_status:
+            return None
         return await agent_status_cache.get_status_or_probe(
             window_id,
             lambda: tmux_manager.agent_status(window_id),

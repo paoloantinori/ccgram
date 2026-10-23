@@ -6,7 +6,7 @@ owns transcript content):
 
 - **agent status** pushes update the neutral ``agent_status_cache``, which the
   status-poll loop reads instead of forking a ``herdr`` subprocess each tick
-  (``observe._native_agent_status``).
+  (``observe._native_status_or_probe``).
 - **window death** pushes trigger the existing dead-window banner
   (``_handle_dead_window_notification``), which is idempotent against the poll
   loop's own death detection (``is_dead_notified`` / ``mark_dead_notified``), so

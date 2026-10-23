@@ -82,6 +82,17 @@ default was 1 (minutes). Lowering is one .env edit + restart.
 - env: both bridges now CCGRAM_REPLAY_CAP_MB=4 (user-approved, backups
   .env.bak.* on each machine).
 
+## Follow-up (code-review on c0f12540, 2026-10-22)
+
+- Mixed cache_positive modes on one window: a default-caller 15s negative
+  can be served to a pass-through caller, and a pass-through None can
+  clobber a just-pushed positive. Unreachable today (set_status is only
+  written by the stream consumer, and stream callers always default
+  mode); when a second consumer appears, stamp entries with their mode
+  and make _get_entry skip mismatches.
+- Docstrings updated for the rename across agent_status_cache.py,
+  event_stream_monitor.py, architecture.md, and the test module.
+
 ## Acceptance
 
 - A session loaded with a gap above the cap auto-skips at discovery with

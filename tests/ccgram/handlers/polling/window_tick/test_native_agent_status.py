@@ -1,10 +1,11 @@
 """Unit tests for the native-agent-status gap-fill in ``observe``.
 
 ``_native_status_or_probe`` resolves the native status freshness-policied
-native agent state (herdr) when terminal scraping yielded nothing. It is gated
-on ``capabilities.native_agent_status`` and only surfaces ``working`` /
-``blocked``; ``idle`` / ``done`` / ``unknown`` return None so the existing
-activity-based idle/done logic stays in control.
+per backend (stream: cache-first, probe-only: pass-through positives and
+short-TTL negatives); ``_native_status_to_update`` surfaces ``working`` /
+``blocked`` and returns None for ``idle`` / ``done`` / ``unknown`` so the
+activity-based idle/done logic stays in control. The
+``native_agent_status`` capability gate lives in ``_resolve_status``.
 """
 
 from __future__ import annotations
@@ -62,13 +63,6 @@ async def test_probe_only_backend_reads_each_status_transition(
 
     assert (status.display_label if status else None) == expected_label
     assert mux.agent_status.await_count == 2
-
-
-async def test_backend_without_native_status_never_probes() -> None:
-    # The native_agent_status gate lives at the _resolve_status seam
-    # (native_once); see test_working_gate for its wiring test. At the
-    # helper level a backend without the capability is out of contract.
-    pytest.skip("gate moved to _resolve_status; covered in test_working_gate")
 
 
 async def test_working_state_becomes_busy_status() -> None:

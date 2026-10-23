@@ -1,11 +1,13 @@
-"""Backend-neutral push-updated agent-status cache.
+"""Backend-neutral agent-status cache: push-written, probe-populated.
 
 The herdr event-stream consumer writes the latest native ``AgentStatus`` per
-window here; the status-polling layer (``observe._native_agent_status``) reads
-it synchronously instead of forking a ``herdr`` subprocess every tick. This
-bridges the push stream and the existing poll loop (the "augment" reconcile):
-push keeps the cache fresh, the poll reads it, and a one-shot subprocess
-``agent_status()`` is the cold-cache fallback.
+window here; the status-polling layer (``observe._native_status_or_probe``)
+reads it, and on backends without a push stream the probe-only callers
+populate it directly (positives pass through uncached, negatives are cached
+for the short pass-through TTL). This bridges the push stream and the
+existing poll loop (the "augment" reconcile): push keeps the cache fresh,
+the poll reads it, and a one-shot subprocess ``agent_status()`` is the
+cold-cache fallback.
 
 Pure module — depends only on the seam value type (``AgentStatus``), never on a
 concrete backend, so the polling layer can import it without crossing the F1
