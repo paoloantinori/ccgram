@@ -58,6 +58,36 @@ class TestBootstrapApplicationOrdering:
         instance.set_message_callback.assert_not_called()
         assert bootstrap.session_monitor is instance
 
+    async def test_start_session_monitor_wires_backlog_damper_resolver(self):
+        app = _make_app()
+        bootstrap.wire_runtime_callbacks()
+        with patch("ccgram.bootstrap.SessionMonitor") as monitor_cls:
+            instance = MagicMock()
+            instance.start = MagicMock()
+            monitor_cls.return_value = instance
+            with patch("ccgram.bootstrap.set_active_monitor"):
+                await bootstrap.start_session_monitor(app)
+
+        instance.set_backlog_damp_resolver.assert_called_once()
+        resolver = instance.set_backlog_damp_resolver.call_args.args[0]
+
+        with patch(
+            "ccgram.bootstrap.iter_bound_topics",
+            return_value=[(7, 55, 42, "@3")],
+        ):
+            assert resolver("@3") == (7, 42, 55)
+
+        with (
+            patch(
+                "ccgram.bootstrap.iter_bound_topics",
+                return_value=[(7, None, 42, "@3")],
+            ),
+            patch("ccgram.bootstrap.resolve_chat_id", return_value=55) as chat,
+        ):
+            assert resolver("@3") == (7, 42, 55)
+            assert resolver("@9") is None
+        chat.assert_called_once_with(7, 42)
+
 
 class TestEnsureMultiplexerSession:
     async def test_forwards_to_active_backend(self):

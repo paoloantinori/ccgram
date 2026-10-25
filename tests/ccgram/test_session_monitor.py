@@ -3141,6 +3141,246 @@ class TestCheckForUpdates:
         assert "hello" in msgs[0].text
 
 
+class TestBacklogWakeDamper:
+    """Automatic damper for undelivered gaps found when tracking re-enters."""
+
+    THRESHOLD = 64
+
+    @staticmethod
+    def _assistant_line(text: str) -> str:
+        return (
+            '{"type":"assistant","message":{"content":'
+            f'[{{"type":"text","text":"{text}"}}]}}\n'
+        )
+
+    @staticmethod
+    def _write_preloaded_state(
+        state_file,
+        session_id: str,
+        transcript,
+        watermark: int,
+        pending_skips: dict | None = None,
+    ) -> None:
+        state_file.write_text(
+            json.dumps(
+                {
+                    "tracked_sessions": {
+                        session_id: {
+                            "session_id": session_id,
+                            "file_path": str(transcript),
+                            "last_byte_offset": watermark,
+                        }
+                    },
+                    "events_offset": 0,
+                    "pending_skips": pending_skips or {},
+                }
+            )
+        )
+
+    @staticmethod
+    def _wire_damper(monitor: SessionMonitor, resolved=None):
+        purge = AsyncMock(return_value=0)
+        notice = AsyncMock()
+        monitor.set_skip_callbacks(
+            purge=purge,
+            notice=notice,
+            validate=Mock(return_value=True),
+        )
+        resolver = Mock(return_value=resolved)
+        monitor.set_backlog_damp_resolver(resolver)
+        return purge, notice, resolver
+
+    def _current_map(self, transcript) -> dict:
+        return {
+            "@0": {
+                "session_id": "s1",
+                "cwd": "/proj",
+                "window_name": "proj",
+                "transcript_path": str(transcript),
+            },
+        }
+
+    def _monitor_for(self, tmp_path, transcript, watermark: int, pending=None):
+        state_file = tmp_path / "monitor-state.json"
+        self._write_preloaded_state(
+            state_file, "s1", transcript, watermark, pending_skips=pending
+        )
+        return SessionMonitor(
+            projects_path=tmp_path / "projects", state_file=state_file
+        )
+
+    def _set_threshold(self, monkeypatch, value: int) -> None:
+        monkeypatch.setattr(
+            "ccgram.session_monitor.config.backlog_damp_threshold_bytes", value
+        )
+
+    async def test_entry_gap_above_threshold_arms_barrier_and_enqueues_nothing(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        self._set_threshold(monkeypatch, self.THRESHOLD)
+        transcript = tmp_path / "transcript.jsonl"
+        delivered = self._assistant_line("delivered")
+        transcript.write_text(delivered + self._assistant_line("backlog" * 20))
+        monitor = self._monitor_for(
+            tmp_path, transcript, watermark=len(delivered.encode())
+        )
+        purge, notice, resolver = self._wire_damper(monitor, resolved=(1, 4, -100))
+
+        messages = await monitor.check_for_updates(self._current_map(transcript))
+
+        assert messages == []
+        assert monitor._transcript_reader.drain_batches() == ()
+        intent = monitor.state.pending_skips["s1"]
+        assert intent.window_id == "@0"
+        assert (intent.user_id, intent.thread_id, intent.chat_id) == (1, 4, -100)
+        assert intent.range_start == len(delivered.encode())
+        assert intent.snapshot_offset == transcript.stat().st_size
+        resolver.assert_called_once_with("@0")
+        purge.assert_awaited_once()
+        notice.assert_awaited_once()
+        persisted = json.loads((tmp_path / "monitor-state.json").read_text())
+        assert "s1" in persisted["pending_skips"]
+
+    async def test_entry_gap_below_threshold_replays_normally(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        self._set_threshold(monkeypatch, self.THRESHOLD)
+        transcript = tmp_path / "transcript.jsonl"
+        delivered = self._assistant_line("delivered")
+        transcript.write_text(delivered + self._assistant_line("live"))
+        monitor = self._monitor_for(
+            tmp_path, transcript, watermark=len(delivered.encode())
+        )
+        purge, notice, resolver = self._wire_damper(monitor, resolved=(1, 4, -100))
+
+        messages = await monitor.check_for_updates(self._current_map(transcript))
+
+        assert monitor.state.pending_skips == {}
+        resolver.assert_not_called()
+        purge.assert_not_awaited()
+        notice.assert_not_awaited()
+        assert [message.text for message in messages] == ["live"]
+
+    async def test_disabled_damper_replays_huge_gap_normally(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        self._set_threshold(monkeypatch, 0)
+        transcript = tmp_path / "transcript.jsonl"
+        delivered = self._assistant_line("delivered")
+        transcript.write_text(delivered + self._assistant_line("backlog" * 20))
+        monitor = self._monitor_for(
+            tmp_path, transcript, watermark=len(delivered.encode())
+        )
+        purge, notice, resolver = self._wire_damper(monitor, resolved=(1, 4, -100))
+
+        messages = await monitor.check_for_updates(self._current_map(transcript))
+
+        assert monitor.state.pending_skips == {}
+        resolver.assert_not_called()
+        purge.assert_not_awaited()
+        assert len(messages) == 1
+
+    async def test_no_rearm_while_barrier_already_pending(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        self._set_threshold(monkeypatch, self.THRESHOLD)
+        transcript = tmp_path / "transcript.jsonl"
+        delivered = self._assistant_line("delivered")
+        transcript.write_text(delivered + self._assistant_line("backlog" * 20))
+        pending = {
+            "s1": {
+                "session_id": "s1",
+                "window_id": "@0",
+                "user_id": 1,
+                "thread_id": 4,
+                "chat_id": -100,
+                "snapshot_offset": 7,
+                "range_start": 3,
+            }
+        }
+        monitor = self._monitor_for(
+            tmp_path, transcript, watermark=len(delivered.encode()), pending=pending
+        )
+        purge, notice, resolver = self._wire_damper(monitor, resolved=(1, 4, -100))
+
+        messages = await monitor.check_for_updates(self._current_map(transcript))
+
+        assert messages == []
+        assert monitor.state.pending_skips["s1"].range_start == 3
+        resolver.assert_not_called()
+        purge.assert_not_awaited()
+        notice.assert_not_awaited()
+
+    async def test_resolver_without_bound_topic_logs_and_keeps_replay(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        from structlog.testing import capture_logs
+
+        self._set_threshold(monkeypatch, self.THRESHOLD)
+        transcript = tmp_path / "transcript.jsonl"
+        delivered = self._assistant_line("delivered")
+        transcript.write_text(delivered + self._assistant_line("backlog" * 20))
+        monitor = self._monitor_for(
+            tmp_path, transcript, watermark=len(delivered.encode())
+        )
+        purge, notice, resolver = self._wire_damper(monitor, resolved=None)
+
+        with capture_logs() as logs:
+            messages = await monitor.check_for_updates(self._current_map(transcript))
+
+        assert monitor.state.pending_skips == {}
+        resolver.assert_called_once_with("@0")
+        assert len(messages) == 1
+        assert any(
+            entry.get("log_level") == "warning"
+            and "no bound topic" in entry.get("event", "")
+            for entry in logs
+        )
+
+    async def test_runtime_poll_growing_gap_never_arms(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        self._set_threshold(monkeypatch, self.THRESHOLD)
+        transcript = tmp_path / "transcript.jsonl"
+        delivered = self._assistant_line("delivered")
+        transcript.write_text(delivered)
+        monitor = self._monitor_for(
+            tmp_path, transcript, watermark=len(delivered.encode())
+        )
+        purge, notice, resolver = self._wire_damper(monitor, resolved=(1, 4, -100))
+        current_map = self._current_map(transcript)
+
+        assert await monitor.check_for_updates(current_map) == []
+
+        transcript.write_text(delivered + self._assistant_line("later" * 30))
+        messages = await monitor.check_for_updates(current_map)
+
+        assert monitor.state.pending_skips == {}
+        resolver.assert_not_called()
+        assert len(messages) == 1
+
+    async def test_damper_without_resolver_is_inert(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        self._set_threshold(monkeypatch, self.THRESHOLD)
+        transcript = tmp_path / "transcript.jsonl"
+        delivered = self._assistant_line("delivered")
+        transcript.write_text(delivered + self._assistant_line("backlog" * 20))
+        monitor = self._monitor_for(
+            tmp_path, transcript, watermark=len(delivered.encode())
+        )
+        monitor.set_skip_callbacks(
+            purge=AsyncMock(return_value=0),
+            notice=AsyncMock(),
+            validate=Mock(return_value=True),
+        )
+
+        messages = await monitor.check_for_updates(self._current_map(transcript))
+
+        assert monitor.state.pending_skips == {}
+        assert len(messages) == 1
+
+
 class TestCheckForUpdatesExceptionResilience:
     async def test_error_in_one_session_does_not_block_others(self, tmp_path) -> None:
         good_file = tmp_path / "good.jsonl"

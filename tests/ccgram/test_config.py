@@ -4,6 +4,7 @@ import pytest
 
 from ccgram.config import (
     Config,
+    _backlog_damp_threshold_bytes,
     _delivery_watch_gap_bytes,
     _skip_barrier_deadline_s,
 )
@@ -343,3 +344,22 @@ class TestDeliveryWatchGap:
     def test_invalid_values_fall_back(self, monkeypatch, raw) -> None:
         monkeypatch.setenv("CCGRAM_DELIVERY_WATCH_GAP_KB", raw)
         assert _delivery_watch_gap_bytes() == 256 * 1024
+
+
+class TestBacklogDampThreshold:
+    def test_default_when_unset(self, monkeypatch) -> None:
+        monkeypatch.delenv("CCGRAM_BACKLOG_DAMP_KB", raising=False)
+        assert _backlog_damp_threshold_bytes() == 8192 * 1024
+
+    def test_override_honored(self, monkeypatch) -> None:
+        monkeypatch.setenv("CCGRAM_BACKLOG_DAMP_KB", "64")
+        assert _backlog_damp_threshold_bytes() == 64 * 1024
+
+    def test_zero_disables(self, monkeypatch) -> None:
+        monkeypatch.setenv("CCGRAM_BACKLOG_DAMP_KB", "0")
+        assert _backlog_damp_threshold_bytes() == 0
+
+    @pytest.mark.parametrize("raw", ["", "abc", "10mb", "inf", "nan", "1e308"])
+    def test_invalid_values_fall_back(self, monkeypatch, raw) -> None:
+        monkeypatch.setenv("CCGRAM_BACKLOG_DAMP_KB", raw)
+        assert _backlog_damp_threshold_bytes() == 8192 * 1024
