@@ -262,8 +262,16 @@ def _codex(entry: SourceEntry, state: _CodexState) -> TranscriptRecord | None:
         return _codex_message(data, key, timestamp, state)
     if not isinstance(kind, str):
         return None
-    if kind == "message" and data.get("role") in {"user", "assistant"}:
-        return _codex_message(data, key, timestamp, state)
+    if kind == "message":
+        if data.get("role") in {"user", "assistant"}:
+            return _codex_message(data, key, timestamp, state)
+        # Non-conversation roles (system) yield no record but still end any
+        # in-flight agent stream, or the next assistant delta would merge
+        # into the pre-system message. Mirror-dedup memory (last_*) stays:
+        # a mid-turn system blob must not un-dedup the turn's own mirror.
+        state.stream_key = None
+        state.stream_text = None
+        return None
     return _codex_other_item(data, key, timestamp, state)
 
 
