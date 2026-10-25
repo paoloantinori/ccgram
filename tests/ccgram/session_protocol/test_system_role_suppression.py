@@ -30,7 +30,7 @@ _RAW_ENTRY = {
 
 
 def test_zai_reminder_entry_yields_no_records():
-    records, _ = parse_records((SourceEntry(0, _RAW_ENTRY),), "claude")
+    records, _ = parse_records([SourceEntry(0, _RAW_ENTRY)], "claude")
     assert list(records) == []
 
 
@@ -42,7 +42,7 @@ def test_user_and_agent_still_parse_and_render():
         _RAW_ENTRY, uuid="a", message={"role": "assistant", "content": "hi"}
     )
     records, _ = parse_records(
-        (SourceEntry(0, user_entry), SourceEntry(0, agent_entry)), "claude"
+        [SourceEntry(0, user_entry), SourceEntry(0, agent_entry)], "claude"
     )
     assert [record.role for _, record in records] == ["user", "agent"]
     rendered = render_protocol_records("s", "claude", records, TranscriptParserState())

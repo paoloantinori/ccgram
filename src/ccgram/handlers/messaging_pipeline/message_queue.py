@@ -34,6 +34,7 @@ from ...telegram_client import TelegramClient
 from ...telegram_rate_limiter import retry_after_seconds
 from ...thread_router import thread_router
 from ...topic_state_registry import topic_state
+from ...session_query import binding_matches_window
 from ...window_resolver import resolve_window_alias
 from ...multiplexer.window_liveness import is_window_live, reset_window_liveness
 from ...utils import task_done_callback
@@ -306,10 +307,8 @@ async def purge_source_tasks(
     tkey = thread_key(thread_id)
     removed: list[ContentTask] = []
     async with lock:
-        if (
-            chat_id is not None
-            and thread_router.resolve_window_for_thread(user_id, thread_id, chat_id)
-            != window_id
+        if chat_id is not None and not binding_matches_window(
+            user_id, thread_id, chat_id, window_id
         ):
             logger.warning(
                 "Skipping stale backlog purge for rebound topic",
@@ -1147,10 +1146,9 @@ async def _process_content_task(
     """Process a content message task and report whether it reached Telegram."""
     if task.is_backlog_notice and (
         task.chat_id is None
-        or thread_router.resolve_window_for_thread(
-            user_id, task.thread_id, task.chat_id
+        or not binding_matches_window(
+            user_id, task.thread_id, task.chat_id, task.window_id
         )
-        != task.window_id
     ):
         logger.warning(
             "Dropping stale backlog skip notice",
