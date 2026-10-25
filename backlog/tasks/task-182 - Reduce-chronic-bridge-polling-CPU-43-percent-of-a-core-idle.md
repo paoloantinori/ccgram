@@ -65,6 +65,33 @@ append schedule and are superseded); tests 42 focused + 8124 full and
 live post-fix CPU 18-19% independently reproduced. The live before/after
 A/B and the pyte attribution of the remaining cost stay unproven.
 
+## SLICE 2 SHIPPED (2026-10-25 late, fork/main d0b098d7, both bridges)
+
+Escape-free captures skip pyte entirely (staged admission: isprintable,
+isascii, wcwidth on the remainder, margin check; 68 us vs 6823 us per
+feed+display on a 44-line 2.9 KB capture, 100x). Deliberate behavior
+change on the herdr path: bare-LF captures no longer render cumulatively
+staggered (pyte LNM-off artifact present since the tmux-era wrapper);
+parity tests pin the CRLF-equivalent frame. Follow-up idea from the
+altitude review (not built): a captures_rendered_text capability on the
+multiplexer seam so text backends skip the ScreenBuffer cycle entirely.
+
+## HONEST ACCEPTANCE STATUS: 5% NOT REACHED, AND WHY
+
+Slices 1 and 2 removed exactly the two named hotspots (verified
+deterministically: digests 902 MB to 20 MB per 30 cycles; pyte feed+display
+100x), but live steady-state CPU on bird is still ~18-19% of a core
+(measured twice past the startup sweep) versus the 30-43% baseline. The
+profile shows the remaining cost is DISTRIBUTED across the whole 1 s
+polling machinery (49 sessions' mtime scans, 11 windows' status work,
+parse of genuinely new entries, asyncio overhead), not concentrated in a
+named function: no single-site fix reaches 5%. Reaching it requires doing
+less work per tick (adaptive polling: active windows at 1 s, idle ones at
+10-30 s, or event-driven status), which changes freshness behavior and is
+a product decision for the maintainer. This task stays Open with that
+decision point; slices 1 and 2 are kept regardless (real costs removed,
+100x and 100x locally, measured numbers above).
+
 ## UPSTREAM PORT STATUS (parked 2026-10-25)
 
 Upstream main moved to v4.18.4 (refactor #350 isolated monitor/lifecycle
