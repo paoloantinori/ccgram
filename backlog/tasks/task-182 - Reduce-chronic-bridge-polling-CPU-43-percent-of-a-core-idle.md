@@ -55,6 +55,16 @@ pyte/screens.py render hit ~7M internal calls, the biggest named item;
 (3) transcript JSON parsing of genuinely new entries. Live CPU now
 17-31% of a core depending on agent activity (was 30-43% baseline).
 
+INDEPENDENT VERIFICATION (skeptic agent, fresh session, 2026-10-25):
+the twice-per-cycle mechanism is CONFIRMED by code reading of 2c627d29
+(and a third unconditional digest site was found in
+_prepare_observed_generation, gated by the fix); an independent harness
+reproduced 61 digest calls / 610.7 MB hashed pre-fix vs 1 / 10 MB
+post-fix (the in-session harness numbers 90/902.7 MB used a different
+append schedule and are superseded); tests 42 focused + 8124 full and
+live post-fix CPU 18-19% independently reproduced. The live before/after
+A/B and the pyte attribution of the remaining cost stay unproven.
+
 ## NEXT (hotspot 1 named)
 
 parse_with_pyte should feed only the delta since the last capture or
