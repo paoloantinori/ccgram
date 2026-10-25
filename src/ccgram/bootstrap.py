@@ -47,6 +47,7 @@ from .handlers.topics.topic_orchestration import (
     is_pending_creation as _is_pending_creation,
 )
 from .session_map import register_in_flight_window_predicate
+from .session_query import iter_bound_topics, resolve_chat_id
 from .handlers.topics.topic_provisioning_recovery import recover_topic_provisioning
 from .multiplexer import get_multiplexer, install_multiplexer, multiplexer
 from .providers import get_provider
@@ -222,6 +223,20 @@ def wire_runtime_callbacks() -> None:
     _callbacks_wired = True
 
 
+def resolve_damp_target(
+    window_id: str,
+) -> tuple[int, int | None, int] | None:
+    """Resolve a window's bound topic for the automatic wake damper."""
+    for user_id, chat_id, thread_id, bound_window_id in iter_bound_topics():
+        if bound_window_id != window_id:
+            continue
+        resolved_chat_id = (
+            chat_id if chat_id is not None else resolve_chat_id(user_id, thread_id)
+        )
+        return user_id, thread_id, resolved_chat_id
+    return None
+
+
 async def start_session_monitor(
     application: Application, *, event_hub: EventHub | None = None
 ) -> SessionMonitor:
@@ -284,6 +299,8 @@ async def start_session_monitor(
         notice=send_skip_notice,
         validate=validate_skip,
     )
+
+    monitor.set_backlog_damp_resolver(resolve_damp_target)
 
     async def new_window_callback(event: NewWindowEvent) -> None:
         # The automatic sink, so eligibility is re-read per window. The monitor

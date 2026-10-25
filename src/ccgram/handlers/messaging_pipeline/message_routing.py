@@ -161,14 +161,18 @@ async def enqueue_backlog_skip_notice(client: TelegramClient, intent: object) ->
     snapshot = int(getattr(intent, "snapshot_offset"))
     start = int(getattr(intent, "range_start"))
     count = int(getattr(intent, "skipped_count"))
+    # An automatic wake-damp (and a manual skip whose queue already drained)
+    # retires nothing: the byte range, not a zero item count, is the news.
+    skipped_line = (
+        f"⏭ Skipped {count} queued transcript item(s) for live view "
+        if count
+        else "⏭ Jumped to live with nothing queued "
+    )
     enqueued = await enqueue_content_message(
         client=client,
         user_id=int(getattr(intent, "user_id")),
         window_id=str(getattr(intent, "window_id")),
-        parts=[
-            f"⏭ Skipped {count} queued transcript item(s) for live view "
-            f"(bytes {start}–{snapshot}). Raw transcript retained."
-        ],
+        parts=[f"{skipped_line}(bytes {start}–{snapshot}). Raw transcript retained."],
         thread_id=getattr(intent, "thread_id"),
         chat_id=int(getattr(intent, "chat_id")),
         is_backlog_notice=True,

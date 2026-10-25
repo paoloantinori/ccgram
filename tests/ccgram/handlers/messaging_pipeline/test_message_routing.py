@@ -1,5 +1,6 @@
 import asyncio
 from collections.abc import Iterator
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -317,3 +318,50 @@ async def test_telegram_echo_is_suppressed_only_for_its_origin_topic(bot, mock_d
 
     mock_deps["eq"].assert_awaited_once()
     assert mock_deps["eq"].call_args.kwargs["user_id"] == 200
+
+
+async def test_backlog_skip_notice_renders_zero_count_as_jump_to_live(bot):
+    intent = SimpleNamespace(
+        snapshot_offset=900,
+        range_start=100,
+        skipped_count=0,
+        user_id=1,
+        window_id="@0",
+        thread_id=4,
+        chat_id=-100,
+    )
+    enqueue = AsyncMock()
+    with patch(
+        "ccgram.handlers.messaging_pipeline.message_routing.enqueue_content_message",
+        enqueue,
+    ):
+        await message_routing.enqueue_backlog_skip_notice(bot, intent)
+
+    assert enqueue.await_args is not None
+    assert enqueue.await_args.kwargs["parts"] == [
+        "⏭ Jumped to live with nothing queued (bytes 100–900). Raw transcript retained."
+    ]
+
+
+async def test_backlog_skip_notice_renders_skipped_items_when_counted(bot):
+    intent = SimpleNamespace(
+        snapshot_offset=900,
+        range_start=100,
+        skipped_count=3,
+        user_id=1,
+        window_id="@0",
+        thread_id=4,
+        chat_id=-100,
+    )
+    enqueue = AsyncMock()
+    with patch(
+        "ccgram.handlers.messaging_pipeline.message_routing.enqueue_content_message",
+        enqueue,
+    ):
+        await message_routing.enqueue_backlog_skip_notice(bot, intent)
+
+    assert enqueue.await_args is not None
+    assert enqueue.await_args.kwargs["parts"] == [
+        "⏭ Skipped 3 queued transcript item(s) for live view "
+        "(bytes 100–900). Raw transcript retained."
+    ]

@@ -152,6 +152,20 @@ class SessionMonitor:
         self._skip_notice_receipts: dict[str, DeliveryReceipt] = {}
         self._skip_retry_attempts: dict[str, int] = {}
         self._skip_retry_at: dict[str, float] = {}
+        # Automatic wake damper: resolves a window's bound topic so the
+        # damper can arm the shared skip path without importing handlers.
+        self._backlog_damp_resolver: (
+            Callable[[str], tuple[int, int | None, int] | None] | None
+        ) = None
+        # Sessions whose tracking was loaded from disk: their watermark
+        # predates this process, so only they can hold a gap that grew
+        # while the bridge was down.
+        self._retracked_session_ids: set[str] = set(self.state.tracked_sessions)
+        # Sessions the damper has already judged once this process. A pending
+        # barrier that cancels on wake (rebound topic) rewrites parsed_offset
+        # without parsing, so the damper keys on this set, not on
+        # parsed_offset, to keep its one-shot, tracking-entry-only semantics.
+        self._damper_decided_sessions: set[str] = set()
 
     # Delegation properties for backward-compatible test access
     @property
@@ -231,6 +245,13 @@ class SessionMonitor:
         self._skip_validate_callback = validate
         self._skip_notice_callback = notice
 
+    def set_backlog_damp_resolver(
+        self,
+        resolver: Callable[[str], tuple[int, int | None, int] | None],
+    ) -> None:
+        """Install the topic resolver used by the automatic wake damper."""
+        self._backlog_damp_resolver = resolver
+
     async def request_backlog_skip(
         self, user_id: int, window_id: str, thread_id: int | None, chat_id: int
     ) -> BacklogSkipIntent | None:
@@ -244,6 +265,30 @@ class SessionMonitor:
         session_id = session_lifecycle.resolve_session_id(window_id)
         if not session_id:
             return None
+        return await self._arm_backlog_skip(
+            user_id=user_id,
+            window_id=window_id,
+            thread_id=thread_id,
+            chat_id=chat_id,
+            session_id=session_id,
+        )
+
+    async def _arm_backlog_skip(
+        self,
+        *,
+        user_id: int,
+        window_id: str,
+        thread_id: int | None,
+        chat_id: int,
+        session_id: str,
+    ) -> BacklogSkipIntent | None:
+        """Shared arm path for manual and automatic skips."""
+        if (
+            self._skip_purge_callback is None
+            or self._skip_notice_callback is None
+            or self._skip_validate_callback is None
+        ):
+            raise RuntimeError("backlog skip callbacks are not wired")
         session = self.state.get_session(session_id)
         if session is None or session_id in self.state.pending_skips:
             return None
@@ -283,6 +328,72 @@ class SessionMonitor:
         if not await self._enqueue_pending_skip_notice(intent):
             return None
         return intent
+
+    async def _maybe_arm_backlog_damper(self, session_id: str, window_id: str) -> None:
+        """Arm the skip barrier for a huge gap that predates this process.
+
+        Only re-tracked sessions (watermark loaded from disk) are candidates,
+        and each is judged exactly once per process: such a gap grew while
+        the bridge was down, and replaying it floods the bound topic
+        (incident 2026-10-25). Live gaps during operation keep the
+        at-least-once replay behavior unchanged.
+        """
+        threshold = config.backlog_damp_threshold_bytes
+        resolver = self._backlog_damp_resolver
+        if threshold <= 0 or resolver is None:
+            return
+        # Decided sessions never re-judge; a pending barrier owns its source
+        # until it resolves (a later cancel still leaves the damper its shot).
+        if (
+            session_id in self._damper_decided_sessions
+            or session_id in self.state.pending_skips
+        ):
+            return
+        if session_id not in self._retracked_session_ids:
+            return
+        self._damper_decided_sessions.add(session_id)
+        tracked = self.state.get_session(session_id)
+        if tracked is None or tracked.last_byte_offset <= 0:
+            # A zero watermark is an explicit replay-from-start marker, not
+            # a grew-while-down gap, so it is never damped.
+            return
+        try:
+            gap = Path(tracked.file_path).stat().st_size - tracked.last_byte_offset
+        except OSError:
+            return
+        if gap <= threshold:
+            return
+        try:
+            resolved = resolver(window_id)
+            if resolved is None:
+                logger.warning(
+                    "Backlog damper found %d undelivered bytes for session %s "
+                    "but no bound topic; keeping replay",
+                    gap,
+                    session_id,
+                )
+                return
+            user_id, thread_id, chat_id = resolved
+            intent = await self._arm_backlog_skip(
+                user_id=user_id,
+                window_id=window_id,
+                thread_id=thread_id,
+                chat_id=chat_id,
+                session_id=session_id,
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception(
+                "Backlog damper failed for session %s; keeping replay", session_id
+            )
+            return
+        if intent is not None:
+            logger.info(
+                "Backlog damper froze %d undelivered bytes for session %s",
+                gap,
+                session_id,
+            )
 
     def _skip_is_current(
         self, intent: BacklogSkipIntent, *, strict: bool = False
@@ -636,6 +747,7 @@ class SessionMonitor:
             fallback_session_ids.add(session_id)
 
         for session_id, file_path in direct_sessions:
+            await self._maybe_arm_backlog_damper(session_id, sid_to_wid[session_id])
             if session_id in self.state.pending_skips:
                 continue
             try:
@@ -652,10 +764,12 @@ class SessionMonitor:
             active_cwds = await self._get_active_cwds()
             sessions = self._scan_projects_sync(active_cwds) if active_cwds else []
             for session_info in sessions:
-                if (
-                    session_info.session_id not in fallback_session_ids
-                    or session_info.session_id in self.state.pending_skips
-                ):
+                if session_info.session_id not in fallback_session_ids:
+                    continue
+                await self._maybe_arm_backlog_damper(
+                    session_info.session_id, sid_to_wid[session_info.session_id]
+                )
+                if session_info.session_id in self.state.pending_skips:
                     continue
                 try:
                     await self._process_session_file(

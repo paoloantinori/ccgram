@@ -76,6 +76,22 @@ def _delivery_watch_gap_bytes() -> int:
         return 256 * 1024
 
 
+def _backlog_damp_threshold_bytes() -> int:
+    """Wake-damper threshold in bytes, floored at 0 (disable) and tolerant
+    of empty or non-numeric input so a bad env value cannot break startup."""
+    try:
+        value = float(os.getenv("CCGRAM_BACKLOG_DAMP_KB") or 8192.0)
+    except ValueError:
+        return 8192 * 1024
+    if not math.isfinite(value):
+        return 8192 * 1024
+    try:
+        return max(0, int(value * 1024))
+    except OverflowError, ValueError:
+        # Finite but too large for an int; treat like any other bad value.
+        return 8192 * 1024
+
+
 def _whisper_timeout_s() -> float:
     """Seconds before the transcription POST gives up, floored at 1s and
     tolerant of empty, non-numeric, or non-finite input (inf would disable
@@ -150,6 +166,7 @@ class Config:
         )
         self.skip_barrier_deadline_s = _skip_barrier_deadline_s()
         self.delivery_watch_gap_bytes = _delivery_watch_gap_bytes()
+        self.backlog_damp_threshold_bytes = _backlog_damp_threshold_bytes()
 
         # Multi-instance support
         group_id_str = os.getenv("CCGRAM_GROUP_ID")

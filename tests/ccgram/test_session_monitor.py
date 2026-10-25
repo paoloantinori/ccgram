@@ -3144,13 +3144,18 @@ class TestCheckForUpdates:
 class TestBacklogWakeDamper:
     """Automatic damper for undelivered gaps found when tracking re-enters."""
 
-    THRESHOLD = 64
+    THRESHOLD = 128
 
     @staticmethod
     def _assistant_line(text: str) -> str:
         return (
-            '{"type":"assistant","message":{"content":'
-            f'[{{"type":"text","text":"{text}"}}]}}\n'
+            json.dumps(
+                {
+                    "type": "assistant",
+                    "message": {"content": [{"type": "text", "text": text}]},
+                }
+            )
+            + "\n"
         )
 
     @staticmethod
@@ -3310,6 +3315,62 @@ class TestBacklogWakeDamper:
         resolver.assert_not_called()
         purge.assert_not_awaited()
         notice.assert_not_awaited()
+
+    async def test_barrier_cancelled_on_wake_still_damps_the_freed_gap(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        """A stale persisted barrier cancels before the damper's first poll.
+
+        The cancel rewrites parsed_offset without parsing, so keying the
+        damper on parsed_offset would miss the grew-while-down gap it exists
+        to freeze (review finding: damper defeated by the aged-cancel path).
+        """
+        self._set_threshold(monkeypatch, self.THRESHOLD)
+        transcript = tmp_path / "transcript.jsonl"
+        delivered = self._assistant_line("delivered")
+        watermark = len(delivered.encode())
+        transcript.write_text(delivered + self._assistant_line("backlog" * 20))
+        pending = {
+            "s1": {
+                "session_id": "s1",
+                "window_id": "@0",
+                "user_id": 1,
+                "thread_id": 4,
+                "chat_id": -100,
+                "snapshot_offset": watermark,
+                "range_start": watermark,
+                "purge_complete": False,
+                "created_at": 1.0,
+            }
+        }
+        monitor = self._monitor_for(
+            tmp_path, transcript, watermark=watermark, pending=pending
+        )
+        purge, notice, resolver = self._wire_damper(monitor, resolved=(1, 4, -100))
+        # The persisted barrier's binding went stale while the bridge was
+        # down; the topic the resolver returns for the live window is not.
+        monitor.set_skip_callbacks(
+            purge=purge,
+            notice=notice,
+            validate=Mock(side_effect=lambda intent: intent.created_at > 1.0),
+        )
+
+        await monitor._advance_skip_barriers()
+        assert monitor.state.pending_skips == {}
+        tracked_after_cancel = monitor.state.get_session("s1")
+        assert tracked_after_cancel is not None
+        assert tracked_after_cancel.parsed_offset == watermark
+
+        messages = await monitor.check_for_updates(self._current_map(transcript))
+
+        assert messages == []
+        assert monitor._transcript_reader.drain_batches() == ()
+        intent = monitor.state.pending_skips["s1"]
+        assert intent.range_start == watermark
+        assert intent.snapshot_offset == transcript.stat().st_size
+        resolver.assert_called_once_with("@0")
+        purge.assert_awaited_once()
+        notice.assert_awaited_once()
 
     async def test_resolver_without_bound_topic_logs_and_keeps_replay(
         self, tmp_path, monkeypatch
