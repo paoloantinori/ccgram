@@ -65,6 +65,18 @@ append schedule and are superseded); tests 42 focused + 8124 full and
 live post-fix CPU 18-19% independently reproduced. The live before/after
 A/B and the pyte attribution of the remaining cost stay unproven.
 
+## UPSTREAM PORT STATUS (parked 2026-10-25)
+
+Upstream main moved to v4.18.4 (refactor #350 isolated monitor/lifecycle
+callbacks) and the 5-commit cherry-pick (branch pr/transcript-prefix-rehash,
+aborted) conflicts structurally in transcript_reader.py + tests (10 hunks).
+The port needs the marker fast path and digest backoff re-applied to the
+refactored read path; do it in a fresh session against upstream/main, then
+open the upstream issue + PR together (approved by the maintainer). The
+codex system-entry issue is DEPRIORITIZED for this round per maintainer
+(we do not run codex); fold it into the #343 contribution later if that
+lands first.
+
 ## NEXT (hotspot 1 named)
 
 parse_with_pyte should feed only the delta since the last capture or
