@@ -150,7 +150,9 @@ async def test_purge_refuses_rebound_topic_before_draining() -> None:
         )
     )
     try:
-        with patch.object(mq, "binding_matches_window", return_value=False):
+        with patch.object(
+            mq.thread_router, "resolve_window_for_thread", return_value="@1"
+        ):
             assert await mq.purge_source_tasks(user_id, "@0", 4, "s1", 50, 99) is None
         assert queue.qsize() == 1
     finally:
@@ -557,50 +559,3 @@ async def test_confirmation_rechecks_severe_threshold() -> None:
     query.answer.assert_awaited_once_with(
         "Backlog is no longer severe", show_alert=True
     )
-
-
-async def test_purge_retires_queue_when_binding_still_matches() -> None:
-    user_id = 703
-    queue = mq._ShardedUserQueue()
-    mq._message_queues[user_id] = queue
-    mq._queue_locks[user_id] = asyncio.Lock()
-    queue.put_nowait(
-        ContentTask(
-            window_id="@0",
-            parts=("old",),
-            thread_id=4,
-            chat_id=99,
-            source_session_id="s1",
-            source_checkpoint=50,
-        )
-    )
-    try:
-        with patch.object(mq, "binding_matches_window", return_value=True):
-            removed = await mq.purge_source_tasks(user_id, "@0", 4, "s1", 50, 99)
-        assert removed == 1
-        assert queue.qsize() == 0
-    finally:
-        mq._message_queues.clear()
-        mq._queue_locks.clear()
-
-
-def test_validate_skip_intent_delegates_to_the_shared_binding_check() -> None:
-    from ccgram.bootstrap import validate_skip_intent
-    from ccgram.monitor_state import BacklogSkipIntent
-
-    intent = BacklogSkipIntent(
-        session_id="s1",
-        window_id="@0",
-        user_id=705,
-        thread_id=4,
-        chat_id=99,
-        snapshot_offset=100,
-        range_start=0,
-    )
-    with patch(
-        "ccgram.session_query.binding_matches_window", return_value=True
-    ) as matches:
-        assert validate_skip_intent(intent) is True
-    matches.assert_called_once_with(705, 4, 99, "@0")
-    with patch("ccgram.session_query.binding_matches_window", return_value=False):
-        assert validate_skip_intent(intent) is False

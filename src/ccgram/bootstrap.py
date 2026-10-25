@@ -69,7 +69,6 @@ from .utils import task_done_callback
 if TYPE_CHECKING:
     from telegram.ext import Application
 
-    from .monitor_state import BacklogSkipIntent
     from .providers.base import HookEvent
     from .session_protocol.runtime import ProtocolRuntime
 
@@ -206,24 +205,6 @@ async def ensure_multiplexer_session() -> None:
         raise SystemExit(1) from exc
 
 
-def validate_skip_intent(intent: "BacklogSkipIntent") -> bool:
-    """Whether a skip barrier's target topic is still bound to its window.
-
-    ``binding_matches_window`` is legacy-aware (chat-less bindings count)
-    and converges the arm-time window id through aliases, but is
-    deliberately session-agnostic: the barrier freezes one session's
-    backlog and stays valid while the TOPIC binding holds, even if the
-    window's session rolled over (a /clear mid-barrier must not cancel
-    the freeze and release the queued backlog).
-    """
-    # Lazy: window_resolver imports session-state types; defer like above.
-    from .session_query import binding_matches_window
-
-    return binding_matches_window(
-        intent.user_id, intent.thread_id, intent.chat_id, intent.window_id
-    )
-
-
 def wire_runtime_callbacks() -> None:
     """Wire module-level callbacks that break cross-subsystem direct imports.
 
@@ -290,10 +271,18 @@ async def start_session_monitor(
     async def send_skip_notice(intent) -> None:
         await enqueue_backlog_skip_notice(client, intent)
 
+    def validate_skip(intent) -> bool:
+        return (
+            thread_router.resolve_window_for_thread(
+                intent.user_id, intent.thread_id, intent.chat_id
+            )
+            == intent.window_id
+        )
+
     monitor.set_skip_callbacks(
         purge=purge_backlog,
         notice=send_skip_notice,
-        validate=validate_skip_intent,
+        validate=validate_skip,
     )
 
     async def new_window_callback(event: NewWindowEvent) -> None:
