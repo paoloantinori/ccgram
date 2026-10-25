@@ -35,6 +35,35 @@ unchanged after the flood source was removed). The spin is in-process
 asyncio work with ~150 syscalls/s (fcntl/getsockopt heavy, negligible
 write volume): a hot await/yield loop in the polling path.
 
+## Progress 2026-10-25 (evening)
+
+SLICE 1 SHIPPED (fork/main cbb9d426, deployed on both bridges): the
+per-cycle transcript prefix re-verification (full read + sha256 of the
+whole consumed prefix, twice per cycle) is now marker-fast-path for
+appends with exponential digest backoff; deterministic side-by-side on
+30 poll cycles over a 10 MB transcript: 90 digest calls / 902.7 MB
+hashed on the old line vs 2 calls / 20 MB on the new one; all
+replacement-protection tests green unchanged (branch
+fix/prefix-verify-cost, commits 8ecc7ab1..cbb9d426).
+
+MEASURED STEADY STATE AFTER SLICE 1 (298 s cProfile of the live-shaped
+foreground run, /tmp/ccgram-prof.out): the remaining cost decomposes as
+(1) pyte screen rendering driven by handlers/polling/polling_state.py:
+parse_with_pyte re-feeding FULL pane captures every tick:
+pyte/screens.py render hit ~7M internal calls, the biggest named item;
+(2) sha256 prefix verification with the new 32-cycle backoff cap;
+(3) transcript JSON parsing of genuinely new entries. Live CPU now
+17-31% of a core depending on agent activity (was 30-43% baseline).
+
+## NEXT (hotspot 1 named)
+
+parse_with_pyte should feed only the delta since the last capture or
+skip unchanged captures entirely (content-hash gate like live_view's);
+protects the same buffers, cost moves from O(captured bytes) per tick
+to O(delta). After that lands, re-measure with the tick-delta method;
+if still above 5%, the residual is the 1s polling model itself
+(interval tuning is a product decision, not a bug).
+
 ## Acceptance
 
 - The hot loop is NAMED with a profile or equivalent evidence (py-spy
