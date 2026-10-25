@@ -142,6 +142,7 @@ dependencies = [
     { name = "qrcode" },
     { name = "structlog" },
     { name = "telegramify-markdown" },
+    { name = "wcwidth" },
 ]
 
 [package.optional-dependencies]
@@ -193,6 +194,7 @@ requires-dist = [
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.16.7" },
     { name = "structlog", specifier = ">=26.1.0" },
     { name = "telegramify-markdown", specifier = ">=1.2.0" },
+    { name = "wcwidth", specifier = ">=0.8.3" },
 ]
 provides-extras = ["dev", "tts"]
 
