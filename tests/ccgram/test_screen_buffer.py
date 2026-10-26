@@ -261,12 +261,21 @@ class TestFastPathParity:
         assert fast.display == ["line 3", "line 4", "line 5"]
         assert fast.display == reference.display
 
-    def test_exact_margin_line_falls_back_to_pyte_wrap(self):
-        # A line exactly columns wide leaves the cursor at the margin, so
-        # pyte wraps the next drawn character to a new row.
+    def test_terminated_margin_line_admits_and_renders_clean(self):
+        # A margin-width row followed by a newline cannot wrap (no more
+        # text arrives on that row), so it admits to the fast path; the
+        # rendering matches the CRLF-normalized fallback either way.
         buf = ScreenBuffer(columns=10, rows=4)
         buf.feed("0123456789\nsecond")
-        assert buf.display[:3] == ["0123456789", "", "second"]
+        assert buf.display[:2] == ["0123456789", "second"]
+
+    def test_unterminated_margin_line_falls_back_and_renders_clean(self):
+        # The same width at the END of a feed (a continuation may still
+        # arrive on that row) keeps the emulator; the CRLF-normalized
+        # fallback still renders the logical rows.
+        buf = ScreenBuffer(columns=10, rows=4)
+        buf.feed("alpha\n0123456789")
+        assert buf.display[:2] == ["alpha", "0123456789"]
 
 
 class TestFastPathRouting:
@@ -321,8 +330,46 @@ class TestFastPathFallbacks:
         buf = ScreenBuffer(columns=40, rows=5)
         buf.feed("abc")
         buf.feed("\x1b[31mR\x1b[0m")
-        # The fast-fed text must reach pyte so the stream stays continuous.
+        # The fast-fed text must reach pyte (CRLF-joined: a bare LF would
+        # stagger the replayed rows) so the stream stays continuous.
         assert buf.display[0] == "abcR"
+
+    def test_replay_error_still_feeds_raw(self):
+        # A pyte exception on the replay must not swallow the capture.
+        class BoomStream:
+            def __init__(self):
+                self.calls = 0
+                self.fed: list[str] = []
+
+            def feed(self, text):
+                self.calls += 1
+                if self.calls == 1:
+                    raise ValueError("boom")
+                self.fed.append(text)
+
+        stream = BoomStream()
+        buf = ScreenBuffer(columns=40, rows=5)
+        buf._stream = stream  # type: ignore[reportAttributeAccessIssue]
+        buf.feed("abc")
+        buf.feed("\x1b[31mR\x1b[0m")
+        assert stream.fed == ["\x1b[31mR\x1b[0m"]
+
+    def test_full_width_separator_frame_stays_fast(self):
+        # Claude Code panes draw full-width separator rows every tick; a
+        # newline-terminated one admits (routing pinned at the stream
+        # seam) so the frame never re-enters pyte emulation.
+        calls: list[str] = []
+        buf = _buffer_with_counting_stream(calls, columns=40, rows=5)
+        buf.feed("alpha\n" + "─" * 40 + "\nbeta")
+        assert calls == []
+        assert buf.display[:3] == ["alpha", "─" * 40, "beta"]
+
+    def test_unterminated_separator_frame_falls_back_clean(self):
+        # The same separator as the final unterminated row keeps pyte;
+        # the CRLF normalization still renders the logical lines.
+        buf = ScreenBuffer(columns=40, rows=5)
+        buf.feed("alpha\n" + "─" * 40)
+        assert buf.display[:2] == ["alpha", "─" * 40]
 
     def test_zero_width_char_nfc_merged_by_pyte(self):
         # pyte merges the combining mark into a precomposed glyph; a leaked
@@ -342,6 +389,8 @@ class TestFastPathFallbacks:
         assert calls == ["abc", "defghij"]
 
     def test_fast_lines_capped_to_rows_like_scrolled_screen(self):
+        # Two feeds so the cross-feed merge and the rows cap combine in
+        # one candidate build, not just each in isolation.
         buf = ScreenBuffer(columns=40, rows=3)
         buf.feed("a\nb\nc\n")
         buf.feed("d\ne")

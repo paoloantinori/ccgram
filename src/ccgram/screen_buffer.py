@@ -18,6 +18,7 @@ from wcwidth import wcwidth
 logger = structlog.get_logger()
 
 _NON_ASCII = re.compile(r"[^\x00-\x7f]+")
+_BARE_LF = re.compile(r"(?<!\r)\n")
 
 
 class ScreenBuffer:
@@ -65,19 +66,11 @@ class ScreenBuffer:
             for chunk in _NON_ASCII.finditer(raw_text):
                 if any(wcwidth(ch) != 1 for ch in chunk.group()):
                     return False
-        parts = raw_text.split("\n")
-        if self._fast_lines is None:
-            candidate = list(parts)
-        else:
-            candidate = self._fast_lines[:-1]
-            candidate.append(self._fast_lines[-1] + parts[0])
-            candidate.extend(parts[1:])
-        for line in candidate:
-            # A line reaching the right margin wraps in pyte (the next
-            # drawn character drops to a new row), so keep the emulator.
-            # The merged first row is checked too: it grew across feeds.
-            if len(line.expandtabs()) >= self._screen.columns:
-                return False
+        candidate = self._merge_fast_parts(raw_text.split("\n"))
+        if any(self._wraps_in_pyte(line) for line in candidate[:-1]) or (
+            candidate and self._wraps_in_pyte(candidate[-1], final=True, raw=raw_text)
+        ):
+            return False
         # Cap the store like pyte's scrolled screen; overflow leaves the
         # top, and display pads from this invariant.
         if len(candidate) > self._screen.lines:
@@ -85,20 +78,56 @@ class ScreenBuffer:
         self._fast_lines = candidate
         return True
 
+    def _merge_fast_parts(self, parts: list[str]) -> list[str]:
+        """Join this feed's parts onto any stored fast lines."""
+        if self._fast_lines is None:
+            return list(parts)
+        candidate = self._fast_lines[:-1]
+        candidate.append(self._fast_lines[-1] + parts[0])
+        candidate.extend(parts[1:])
+        return candidate
+
+    def _wraps_in_pyte(self, line: str, *, final: bool = False, raw: str = "") -> bool:
+        """Whether pyte would wrap this row, disqualifying the fast path.
+
+        A line longer than the margin wraps outright; a line exactly at
+        the margin risks the deferred wrap only while more text can still
+        arrive on that row, so the final part of an unterminated feed
+        keeps the guard while newline-terminated rows (full-width
+        separators included) admit. The merged first row is checked too:
+        it grew across feeds.
+        """
+        width = len(line.expandtabs())
+        if width > self._screen.columns:
+            return True
+        return width == self._screen.columns and final and not raw.endswith("\n")
+
+    def _feed_pyte(self, text: str, err_msg: str) -> None:
+        """Feed one text into pyte, resetting the screen on its errors."""
+        try:
+            self._stream.feed(text)
+        except TypeError, ValueError, KeyError, IndexError, UnicodeDecodeError:
+            logger.debug(err_msg, exc_info=True)
+            self._screen.reset()
+
     def feed(self, raw_text: str) -> None:
         """Feed raw terminal text (with ANSI escapes) into the screen."""
         if self._try_fast_feed(raw_text):
             return
-        replay = "\n".join(self._fast_lines) if self._fast_lines else None
+        replay = "\r\n".join(self._fast_lines) if self._fast_lines else None
         self._fast_lines = None
         self._pyte_fed = True
-        try:
-            if replay:
-                self._stream.feed(replay)
-            self._stream.feed(raw_text)
-        except TypeError, ValueError, KeyError, IndexError, UnicodeDecodeError:
-            logger.debug("pyte feed error, resetting screen", exc_info=True)
-            self._screen.reset()
+        if "\x1b" not in raw_text:
+            # Escape-free text that failed admission (a margin-reaching
+            # row, or pyte already active from an earlier frame): pyte
+            # does not carriage-return on a bare LF, so the frame would
+            # render cumulatively staggered; CRLF keeps the fallback
+            # output identical to the fast path for the same content.
+            # Only bare LFs: an existing CR must not be doubled.
+            raw_text = _BARE_LF.sub("\r\n", raw_text)
+        if replay:
+            self._feed_pyte(replay, "pyte replay error, resetting screen")
+        self._feed_pyte(raw_text, "pyte feed error, resetting screen")
 
     @property
     def display(self) -> list[str]:
