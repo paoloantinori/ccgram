@@ -92,6 +92,22 @@ a product decision for the maintainer. This task stays Open with that
 decision point; slices 1 and 2 are kept regardless (real costs removed,
 100x and 100x locally, measured numbers above).
 
+## REVIEW HARDENING SHIPPED (2026-10-26, fork/main 99d21f84, both bridges)
+
+A high-effort review of the fast path (run by the maintainer) found
+three verified defects and one measured gap, all fixed: CRLF replay
+join (pyte re-staggered fast lines on fallback), bare-LF normalization
+on the escape-free fallback (identical rendering on both paths, no
+phantom hash flips in shell_capture), raw feed always attempted after a
+replay exception (shared _feed_pyte helper), and newline-terminated
+exact-margin rows now ADMIT: frames carrying Claude Code full-width
+separators had been permanently relegated to ~9x pyte re-emulation
+(0.65 ms vs 0.07 ms per feed, measured); they now stay fast. Gates:
+/simplify 3 passes, /code-review high 8 angles, suite 8154, pyright 0/0
+(BoomStream stub got the file's own type-ignore idiom). Steady-state
+CPU after deploy: 15-18% of a core (two windows, past the sweep), from
+the 30-43% baseline.
+
 ## UPSTREAM PORT STATUS (parked 2026-10-25)
 
 Upstream main moved to v4.18.4 (refactor #350 isolated monitor/lifecycle
