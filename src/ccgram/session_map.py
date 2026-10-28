@@ -297,6 +297,23 @@ def observed_provider(info: dict[str, Any]) -> str:
     return inferred or (provider.lower() if isinstance(provider, str) else "")
 
 
+def raw_session_map_entry(
+    raw: Mapping[str, object], window_id: str
+) -> dict[str, Any] | None:
+    """Return the raw file entry for ``window_id``, or None when absent.
+
+    Raw file truth, deliberately not merged with in-memory state: callers
+    deciding whether a binding is orphaned must see the map as the hook
+    left it, not the last-synced memory of it. Uses the same prefix and
+    case-insensitive identity matching as the sync path.
+    """
+    key = _find_session_map_key(raw, window_id)
+    if key is None:
+        return None
+    info = raw.get(key)
+    return info if isinstance(info, dict) else None
+
+
 def parse_session_map(raw: dict[str, Any], prefix: str) -> dict[str, dict[str, Any]]:
     """Parse session_map.json entries matching a backend prefix.
 

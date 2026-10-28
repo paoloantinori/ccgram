@@ -26,6 +26,9 @@ def _tasks(now: float):
         patch(
             _MODULE + "check_delivery_wedges", new_callable=AsyncMock
         ) as delivery_watch,
+        patch(
+            _MODULE + "check_orphan_bindings", new_callable=AsyncMock
+        ) as orphan_watch,
         patch(_MODULE + "prune_stale_state", new_callable=AsyncMock) as prune,
         patch(_MODULE + "probe_topic_existence", new_callable=AsyncMock) as probe,
         patch(_MODULE + "check_unbound_window_ttl", new_callable=AsyncMock) as unbound,
@@ -43,6 +46,7 @@ def _tasks(now: float):
         yield MagicMock(
             live=live,
             delivery_watch=delivery_watch,
+            orphan_watch=orphan_watch,
             prune=prune,
             probe=probe,
             unbound=unbound,
@@ -88,6 +92,7 @@ class TestRunPeriodicTasks:
         assert tasks.probe.await_count == (1 if expected else 0)
         assert tasks.cleanup.await_count == (1 if expected else 0)
         assert tasks.delivery_watch.await_count == (1 if expected else 0)
+        assert tasks.orphan_watch.await_count == (1 if expected else 0)
         assert tasks.sweep.call_count == (1 if expected else 0)
         assert timers["topic_check"] == (elapsed if expected else 0.0)
 
@@ -103,6 +108,7 @@ class TestRunPeriodicTasks:
         tasks.probe.assert_awaited_once_with(client, ANY)
         tasks.cleanup.assert_awaited_once_with(client, exclude_reasons=None)
         tasks.recover.assert_awaited_once_with(client, adapter=adapter)
+        tasks.orphan_watch.assert_awaited_once_with(client, windows)
 
     async def test_autodelete_off_excludes_dead_session_retirements(self):
         timers = {"live_view": 1e9, "topic_check": 0.0}

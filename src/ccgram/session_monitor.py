@@ -189,6 +189,26 @@ class SessionMonitor:
         """Get monotonic timestamp of last transcript activity for a session."""
         return self._idle_tracker.get_last_activity(session_id)
 
+    async def seed_session_offset_at_eof(
+        self,
+        session_id: str,
+        transcript_path: str,
+        window_id: str,
+        provider_name: str,
+    ) -> None:
+        """Register a session with its durable offset at EOF, never replaying.
+
+        The orphan watch relinks a binding to a session the monitor has
+        never tracked. Seeding through the reader's own start path keeps
+        the companion caches (mtime, generation, prefix digest) coherent
+        instead of writing a bare TrackedSession from outside.
+        """
+        provider = get_provider_for_window(window_id, provider_name=provider_name)
+        await self._transcript_reader._start_tracking_session(
+            session_id, Path(transcript_path), provider, window_id, provider_name
+        )
+        self.state.save_if_dirty()
+
     def _discard_session_delivery_state(self, session_id: str) -> None:
         """Drop receipts tied to a session identity that no longer exists."""
         self._delivery_receipts.pop(session_id, None)

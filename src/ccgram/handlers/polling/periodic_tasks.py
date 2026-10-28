@@ -19,6 +19,7 @@ from ...utils import log_throttle_sweep
 from ...session_protocol.telegram import TelegramSessionAdapter
 from ..live.live_view import tick_live_views
 from .delivery_watch import check_delivery_wedges
+from .orphan_watch import check_orphan_bindings
 from ..topics.topic_deletion import cleanup_retired_topics
 from ..topics.topic_provisioning_recovery import recover_topic_provisioning
 from ..topics.topic_lifecycle import (
@@ -74,8 +75,11 @@ async def run_periodic_tasks(
                 ),
             )
         log_throttle_sweep()
-        # Last in the block so a raise here cannot skip the peers.
+        # Late in the block so a raise here cannot skip the peers.
         await check_delivery_wedges(client)
+        # Truly last: the orphan pass guards its own per-window errors, so
+        # a raise inside it cannot skip anything that still owes a run.
+        await check_orphan_bindings(client, all_windows)
 
 
 async def run_lifecycle_tasks(

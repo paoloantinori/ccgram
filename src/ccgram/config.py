@@ -168,6 +168,17 @@ class Config:
         self.skip_barrier_deadline_s = _skip_barrier_deadline_s()
         self.delivery_watch_gap_bytes = _delivery_watch_gap_bytes()
         self.replay_cap_bytes = _replay_cap_bytes()
+        # Orphaned-binding watchdog (2026-10-28 incident: hermes-fleet
+        # topics sat mute for two days after their session_map entries
+        # died while the windows stayed live). CCGRAM_ORPHAN_WATCH=0
+        # disables the whole watchdog; CCGRAM_ORPHAN_AUTO_RELINK=0 keeps
+        # detection and the topic notice but never rewrites session_map.
+        self.orphan_watch_enabled: bool = os.getenv(
+            "CCGRAM_ORPHAN_WATCH", "true"
+        ).strip().lower() not in ("0", "false", "no", "off")
+        self.orphan_auto_relink: bool = os.getenv(
+            "CCGRAM_ORPHAN_AUTO_RELINK", "true"
+        ).strip().lower() not in ("0", "false", "no", "off")
 
         # Multi-instance support
         group_id_str = os.getenv("CCGRAM_GROUP_ID")

@@ -96,6 +96,10 @@ _SINGLETON_ALLOWLIST = frozenset(
         "messaging_pipeline/topic_commands.py",
         "polling/polling_coordinator.py",
         "polling/polling_state.py",
+        # orphan_watch rewrites a session_map entry (synthetic relink write,
+        # same as transcript_discovery) and reads the topic's display name;
+        # monitor seeding goes through SessionMonitor.seed_session_offset_at_eof.
+        "polling/orphan_watch.py",
         "polling/window_tick/apply.py",
         "recovery/history.py",
         "recovery/recovery_banner.py",
