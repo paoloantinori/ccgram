@@ -155,7 +155,7 @@ def settled_run_offset(
 
 def retire_aged_failures(
     receipts: list[DeliveryReceipt], *, now: float, grace_s: float
-) -> int:
+) -> list[DeliveryReceipt]:
     """Drop terminally failed receipts older than ``grace_s``, in place.
 
     A failed receipt fences the watermark so its bytes stay replayable.
@@ -166,22 +166,25 @@ def retire_aged_failures(
     failure is retired instead: its bytes become a deliberate skip, the
     raw transcript keeps them for /history, and receipts settled behind
     the failure may commit. ``grace_s <= 0`` disables retirement and
-    keeps the permanent fence. Returns how many receipts were dropped.
+    keeps the permanent fence. Returns the dropped receipts so callers
+    can release state keyed to them (a tool-delivery fence whose release
+    checkpoint was among them).
     """
     if grace_s <= 0:
-        return 0
+        return []
     if not any(receipt.failed for receipt in receipts):
-        return 0
-    kept = [
-        receipt
-        for receipt in receipts
-        if not receipt.failed
-        or (
-            receipt.failed_at is not None  # narrows the property correlation
-            and now - receipt.failed_at < grace_s
-        )
-    ]
-    dropped = len(receipts) - len(kept)
+        return []
+    kept: list[DeliveryReceipt] = []
+    dropped: list[DeliveryReceipt] = []
+    for receipt in receipts:
+        # failed_at is the single failure source (failed derives from it),
+        # so the stamp alone classifies: a None stamp is an unfailed
+        # receipt by construction, never a failed one missing its stamp.
+        failed_at = receipt.failed_at
+        if failed_at is None or now - failed_at < grace_s:
+            kept.append(receipt)
+        else:
+            dropped.append(receipt)
     if dropped:
         receipts[:] = kept
     return dropped

@@ -48,3 +48,21 @@ progress. The pending_tools fence (outstanding tool result) still
 freezes a session's watermark by design. Follow-up ideas declined as
 scope: in-process redelivery of failed bytes; cross-module notice
 unification with orphan_watch.
+
+## Review round (fix/task184-review)
+
+Five findings from a high-effort review of 0c397d30..4f6447bf, all
+addressed. F1: skip-retirement no longer strands a tool-delivery
+fence, whose release receipt it just dropped (watermark froze again);
+the fence releases in the same commit pass, including the corner where
+retirement empties the session's whole receipt list. F2: the cap-check
+sequence is fully inside per-session containment again. F3+F4:
+TranscriptReader.enter_tracking is the single tracking-entry seam
+(provider resolves once per session per cycle; the cap judges exactly
+the offset the read resumes from); the monitor's duplicated gate+adopt
+preamble is deleted, observes_window_provider removed and
+adopt_tracking_for_file re-privatized. F5: the tautological
+failed_at-narrowing conjunct in retire_aged_failures is gone.
+Suite 8225 (3 new fence-retirement tests, red-proven), /simplify 4
+reviewers (one real corner gap found and fixed), /code-review high
+(3/6 applied, 3 declined with reasons in the commit message).

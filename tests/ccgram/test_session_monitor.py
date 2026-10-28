@@ -587,6 +587,18 @@ class TestSettledPrefixWatermarkCommit:
         )
         monitor._delivery_receipts[session_id] = receipts
 
+    def _aged_failed(self, checkpoint: int):
+        """A terminally failed receipt stamped far past the 300s test
+        grace (boot-relative monotonic, so never stamp a fixed zero)."""
+        from ccgram.delivery_contract import DeliveryOutcome
+
+        receipt = self._unsettled(checkpoint)
+        receipt.track()
+        receipt.close()
+        receipt.settle(DeliveryOutcome.FAILED)
+        receipt.failed_at = time.monotonic() - 400.0
+        return receipt
+
     def test_prefix_commit_advances_past_settled_run(
         self, monitor: SessionMonitor
     ) -> None:
@@ -673,6 +685,90 @@ class TestSettledPrefixWatermarkCommit:
         assert self._offset(monitor, "s1") == 200
         assert monitor._delivery_receipts["s1"] == [pending]
         assert "s1" not in monitor._transcript_reader._tool_delivery_fences
+
+    def test_retired_release_receipt_pops_tool_fence_and_commits_same_cycle(
+        self, monitor: SessionMonitor, monkeypatch
+    ) -> None:
+        """Retirement must not strand a fence (2026-10-28 review).
+
+        When the receipt carrying a tool-delivery fence's release
+        checkpoint settles failed and ages past grace, dropping it would
+        leave the fence unpoppable: the release receipt is gone, so the
+        hold condition repeats forever and the watermark freezes (the
+        exact incident retirement exists to kill). The fence must pop in
+        the same commit pass and the settled prefix behind it commits."""
+        from ccgram.config import config
+
+        release = self._aged_failed(200)
+        self._track(monitor, "s1", [self._ready(100), release, self._ready(300)])
+        monitor._transcript_reader._tool_delivery_fences["s1"] = _ToolDeliveryFence(
+            call_checkpoint=100,
+            release_checkpoint=200,
+        )
+
+        monkeypatch.setattr(config, "failed_receipt_grace_s", 300.0)
+        monitor.commit_delivered_watermarks()
+
+        assert self._offset(monitor, "s1") == 300
+        assert "s1" not in monitor._transcript_reader._tool_delivery_fences
+        assert "s1" not in monitor._delivery_receipts
+
+    def test_fresh_failed_release_receipt_keeps_tool_fence(
+        self, monitor: SessionMonitor, monkeypatch
+    ) -> None:
+        """Sibling of the retirement case: inside the grace window the
+        release failure still fences, so a near-term restart replays the
+        tool range; nothing commits and no fence is released."""
+        from ccgram.config import config
+        from ccgram.delivery_contract import DeliveryOutcome
+
+        release = self._unsettled(200)
+        release.track()
+        release.close()
+        release.settle(DeliveryOutcome.FAILED)  # stamps failed_at = now
+        self._track(monitor, "s1", [self._ready(100), release, self._ready(300)])
+        monitor._transcript_reader._tool_delivery_fences["s1"] = _ToolDeliveryFence(
+            call_checkpoint=100,
+            release_checkpoint=200,
+        )
+
+        monkeypatch.setattr(config, "failed_receipt_grace_s", 300.0)
+        monitor.commit_delivered_watermarks()
+
+        assert self._offset(monitor, "s1") == 0
+        assert "s1" in monitor._transcript_reader._tool_delivery_fences
+        assert len(monitor._delivery_receipts["s1"]) == 3
+
+    def test_all_receipts_retired_releases_tool_fence(
+        self, monitor: SessionMonitor, monkeypatch
+    ) -> None:
+        """Stranding corner: the fence's release checkpoint never produced
+        a receipt (the release batch rendered nothing deliverable), and
+        every receipt the session did register failed and aged past
+        grace. Retirement then empties the list, which used to bypass the
+        fence check entirely (the early-exit ran first): the fence stayed
+        live with no evidence ever to arrive, and the next registered
+        delivery held forever on the missing release receipt. The fence
+        must release in the same pass so later deliveries commit."""
+        from ccgram.config import config
+
+        self._track(monitor, "s1", [self._aged_failed(100), self._aged_failed(300)])
+        monitor._transcript_reader._tool_delivery_fences["s1"] = _ToolDeliveryFence(
+            call_checkpoint=100,
+            release_checkpoint=200,
+        )
+
+        monkeypatch.setattr(config, "failed_receipt_grace_s", 300.0)
+        monitor.commit_delivered_watermarks()
+
+        assert self._offset(monitor, "s1") == 0
+        assert "s1" not in monitor._transcript_reader._tool_delivery_fences
+        assert "s1" not in monitor._delivery_receipts
+
+        # The freeze is gone: a fresh settled delivery commits freely.
+        monitor._delivery_receipts["s1"] = [self._ready(400)]
+        monitor.commit_delivered_watermarks()
+        assert self._offset(monitor, "s1") == 400
 
     async def test_parsed_tool_fences_checkpoint_and_rebuilds_after_restart(
         self, tmp_path
@@ -2724,10 +2820,10 @@ class TestPerWindowProviderResolution:
         captured_window_ids = []
         original = monitor._process_session_file
 
-        async def spy(session_id, file_path, new_messages, window_id=""):
+        async def spy(session_id, file_path, new_messages, window_id="", entry=None):
             captured_window_ids.append(window_id)
             return await original(
-                session_id, file_path, new_messages, window_id=window_id
+                session_id, file_path, new_messages, window_id=window_id, entry=entry
             )
 
         monitor._process_session_file = spy
@@ -2787,10 +2883,10 @@ async def test_check_for_updates_auto_skips_over_cap_session(tmp_path) -> None:
         read_session_ids = []
         original_process = monitor._process_session_file
 
-        async def spy(session_id, file_path, new_messages, window_id=""):
+        async def spy(session_id, file_path, new_messages, window_id="", entry=None):
             read_session_ids.append(session_id)
             return await original_process(
-                session_id, file_path, new_messages, window_id=window_id
+                session_id, file_path, new_messages, window_id=window_id, entry=entry
             )
 
         monitor._process_session_file = spy
@@ -2830,10 +2926,10 @@ async def test_check_for_updates_zero_cap_still_reads(tmp_path) -> None:
     read_session_ids = []
     original_process = monitor._process_session_file
 
-    async def spy(session_id, file_path, new_messages, window_id=""):
+    async def spy(session_id, file_path, new_messages, window_id="", entry=None):
         read_session_ids.append(session_id)
         return await original_process(
-            session_id, file_path, new_messages, window_id=window_id
+            session_id, file_path, new_messages, window_id=window_id, entry=entry
         )
 
     monitor._process_session_file = spy
@@ -4062,11 +4158,7 @@ class TestAutoBacklogSkip:
         object.__setattr__(monitor, "request_backlog_skip", fake_skip)
         big = tmp_path / "big.jsonl"
         big.write_text("x" * 100)
-        fake_state = SimpleNamespace(
-            pending_skips=set(),
-            get_session=lambda sid: SimpleNamespace(last_byte_offset=10),
-        )
-        object.__setattr__(monitor, "state", fake_state)
+        object.__setattr__(monitor, "state", SimpleNamespace(pending_skips=set()))
         monkeypatch.setattr(sm_mod, "_REPLAY_CAP_BYTES", 50)
         router = SimpleNamespace(
             iter_thread_bindings_with_chat=lambda: iter([(1, 10, 20, "wA")])
@@ -4074,7 +4166,12 @@ class TestAutoBacklogSkip:
         import ccgram.thread_router as tr_mod
 
         monkeypatch.setattr(tr_mod, "thread_router", router)
-        assert await monitor._maybe_auto_backlog_skip("s", big, "wA") is True
+        assert (
+            await monitor._maybe_auto_backlog_skip(
+                "s", big, "wA", SimpleNamespace(last_byte_offset=10)
+            )
+            is True
+        )
         assert calls == [(1, "wA", 20, 10)]
 
     async def test_small_gap_reads_normally(self, monkeypatch, tmp_path):
@@ -4085,17 +4182,15 @@ class TestAutoBacklogSkip:
         monitor._auto_skip_retry_at = {}
         f = tmp_path / "s.jsonl"
         f.write_text("x" * 10)
-        object.__setattr__(
-            monitor,
-            "state",
-            SimpleNamespace(
-                pending_skips=set(),
-                get_session=lambda sid: SimpleNamespace(last_byte_offset=0),
-            ),
-        )
+        object.__setattr__(monitor, "state", SimpleNamespace(pending_skips=set()))
         monkeypatch.setattr(sm_mod, "_REPLAY_CAP_BYTES", 1_000_000)
         with capture_logs() as logs:
-            assert await monitor._maybe_auto_backlog_skip("s", f, "wA") is False
+            assert (
+                await monitor._maybe_auto_backlog_skip(
+                    "s", f, "wA", SimpleNamespace(last_byte_offset=0)
+                )
+                is False
+            )
         assert not [e for e in logs if "auto backlog skip check failed" in str(e)]
 
     async def test_unbound_window_never_skips(self, monkeypatch, tmp_path):
@@ -4106,21 +4201,19 @@ class TestAutoBacklogSkip:
         monitor._auto_skip_retry_at = {}
         f = tmp_path / "s.jsonl"
         f.write_text("x" * 100)
-        object.__setattr__(
-            monitor,
-            "state",
-            SimpleNamespace(
-                pending_skips=set(),
-                get_session=lambda sid: SimpleNamespace(last_byte_offset=0),
-            ),
-        )
+        object.__setattr__(monitor, "state", SimpleNamespace(pending_skips=set()))
         monkeypatch.setattr(sm_mod, "_REPLAY_CAP_BYTES", 50)
         router = SimpleNamespace(iter_thread_bindings_with_chat=lambda: iter([]))
         import ccgram.thread_router as tr_mod
 
         monkeypatch.setattr(tr_mod, "thread_router", router)
         with capture_logs() as logs:
-            assert await monitor._maybe_auto_backlog_skip("s", f, "wA") is False
+            assert (
+                await monitor._maybe_auto_backlog_skip(
+                    "s", f, "wA", SimpleNamespace(last_byte_offset=0)
+                )
+                is False
+            )
         assert not [e for e in logs if "auto backlog skip check failed" in str(e)]
 
 
@@ -4138,14 +4231,7 @@ class TestAutoBacklogSkipGuards:
         object.__setattr__(monitor, "request_backlog_skip", failing_skip)
         f = tmp_path / "s.jsonl"
         f.write_text("x" * 100)
-        object.__setattr__(
-            monitor,
-            "state",
-            SimpleNamespace(
-                pending_skips=set(),
-                get_session=lambda sid: SimpleNamespace(last_byte_offset=0),
-            ),
-        )
+        object.__setattr__(monitor, "state", SimpleNamespace(pending_skips=set()))
         monkeypatch.setattr(sm_mod, "_REPLAY_CAP_BYTES", 50)
         import ccgram.thread_router as tr_mod
 
@@ -4158,7 +4244,12 @@ class TestAutoBacklogSkipGuards:
         )
         # No barrier persisted: the session must be read normally.
         with capture_logs() as logs:
-            assert await monitor._maybe_auto_backlog_skip("s", f, "wA") is False
+            assert (
+                await monitor._maybe_auto_backlog_skip(
+                    "s", f, "wA", SimpleNamespace(last_byte_offset=0)
+                )
+                is False
+            )
         assert not [e for e in logs if "auto backlog skip check failed" in str(e)]
 
     async def test_zero_cap_is_disabled(self, monkeypatch, tmp_path):
@@ -4169,11 +4260,14 @@ class TestAutoBacklogSkipGuards:
         monkeypatch.setattr(sm_mod, "_REPLAY_CAP_BYTES", 0)
         monitor = sm_mod.SessionMonitor.__new__(sm_mod.SessionMonitor)
         monitor._auto_skip_retry_at = {}
-        # get_session would explode if reached: with cap=0 the guard must
-        # return False BEFORE any state access.
-        object.__setattr__(
-            monitor, "state", SimpleNamespace(pending_skips=set(), get_session=None)
-        )
+        # State would explode if reached: with cap=0 the guard must return
+        # False BEFORE any state access.
+        object.__setattr__(monitor, "state", SimpleNamespace(pending_skips=None))
         f = tmp_path / "s.jsonl"
         f.write_text("x")
-        assert await monitor._maybe_auto_backlog_skip("s", f, "w") is False
+        assert (
+            await monitor._maybe_auto_backlog_skip(
+                "s", f, "w", SimpleNamespace(last_byte_offset=0)
+            )
+            is False
+        )

@@ -76,6 +76,21 @@ class _ToolDeliveryFence:
     release_checkpoint: int | None = None
 
 
+class TrackingEntry(NamedTuple):
+    """One tracking-entry resolution: gate verdict, session, provider.
+
+    ``observed=False`` always pairs with ``tracked=None``: the provider
+    gate rejected before any tracking state was touched. ``tracked=None``
+    with ``observed=True`` means no watermark exists yet, so the read
+    path seeds fresh at EOF and there is no resume offset to cap.
+    """
+
+    observed: bool
+    tracked: TrackedSession | None
+    provider: Any
+    provider_name: str
+
+
 _MARKER_BYTES = 128
 
 # Full-prefix verification is O(file) while appends are the common case, so
@@ -306,21 +321,6 @@ def _tail_marker(file_path: Path, offset: int) -> bytes:
     with file_path.open("rb") as transcript:
         transcript.seek(start)
         return transcript.read(offset - start)
-
-
-def observes_window_provider(window_id: str, file_path: Path) -> bool:
-    """The provider-observation gate every tracking side effect must pass.
-
-    A manual /agent choice stays authoritative: when the window is pinned
-    to a provider the observed transcript does not match, the answer is
-    False and callers must not adopt, seed, or read tracking state.
-    """
-    provider = _resolve_provider_for_file(window_id, file_path)
-    provider_name = (
-        detect_provider_from_transcript_path(str(file_path))
-        or provider.capabilities.name
-    )
-    return identity_state.accepts_provider_observation(window_id, provider_name)
 
 
 def _resolve_provider_for_file(window_id: str, file_path: Path) -> Any:
@@ -871,16 +871,36 @@ class TranscriptReader:
             batch for batch in self._pending_batches if batch.session_id != session_id
         ]
 
-    def adopt_tracking_for_file(
+    def enter_tracking(
+        self, session_id: str, file_path: Path, window_id: str
+    ) -> TrackingEntry:
+        """The single tracking-entry seam: provider gate, then get-or-adopt.
+
+        The monitor's restart-cap judgment and the read path both enter
+        tracking through here, so the cap judges exactly the offset the
+        read path resumes from and the provider resolves once per session
+        per cycle (the read path accepts the already-resolved entry). A
+        manual /agent choice stays authoritative: when the window is
+        pinned to a provider the observed transcript does not match, the
+        entry reports ``observed=False`` and callers must not adopt,
+        seed, or read tracking state.
+        """
+        provider = _resolve_provider_for_file(window_id, file_path)
+        provider_name = (
+            detect_provider_from_transcript_path(str(file_path))
+            or provider.capabilities.name
+        )
+        if not identity_state.accepts_provider_observation(window_id, provider_name):
+            return TrackingEntry(False, None, provider, provider_name)
+        tracked = self._state.get_session(session_id)
+        if tracked is None:
+            tracked = self._adopt_tracking_for_file(session_id, file_path)
+        return TrackingEntry(True, tracked, provider, provider_name)
+
+    def _adopt_tracking_for_file(
         self, session_id: str, file_path: Path
     ) -> TrackedSession | None:
-        """Move offset state when the same transcript appears under a refreshed id.
-
-        Public because the monitor's replay-cap check also calls it: a
-        re-keyed entry must be cap-judged on the watermark it will resume
-        from, before the read path replays the carried gap. Idempotent
-        with the read path's own adoption.
-        """
+        """Move offset state when the same transcript appears under a refreshed id."""
         try:
             target = file_path.resolve()
         except _PathResolveError:
@@ -1016,19 +1036,21 @@ class TranscriptReader:
         new_messages: list[NewMessage],
         window_id: str = "",
         current_map: dict[str, dict[str, Any]] | None = None,
+        entry: TrackingEntry | None = None,
     ) -> None:
-        """Process a single session file for new messages."""
-        tracked = self._state.get_session(session_id)
-        if not observes_window_provider(window_id, file_path):
-            return
-        provider = _resolve_provider_for_file(window_id, file_path)
-        provider_name = (
-            detect_provider_from_transcript_path(str(file_path))
-            or provider.capabilities.name
-        )
+        """Process a single session file for new messages.
 
-        if tracked is None:
-            tracked = self.adopt_tracking_for_file(session_id, file_path)
+        ``entry`` reuses a tracking-entry resolution the caller already
+        made this cycle (the monitor resolves one per session for its
+        restart-cap judgment); ``None`` resolves here.
+        """
+        if entry is None:
+            entry = self.enter_tracking(session_id, file_path, window_id)
+        if not entry.observed:
+            return
+        tracked = entry.tracked
+        provider = entry.provider
+        provider_name = entry.provider_name
 
         if tracked is None:
             await self._start_tracking_session(
