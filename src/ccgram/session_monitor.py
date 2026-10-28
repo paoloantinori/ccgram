@@ -32,6 +32,7 @@ from .delivery_contract import (
     activate_delivery_receipt,
     deactivate_delivery_receipt,
     new_delivery_receipt,
+    retire_aged_failures,
     settled_prefix,
     settled_run_offset,
 )
@@ -55,7 +56,11 @@ from .multiplexer.reconciliation import list_windows_for_reconciliation
 from .multiplexer.window_liveness import note_live_windows
 from .multiplexer.topic_mapping import is_agent_topic_window
 from .monitor_events import NewMessage, NewWindowEvent, SessionInfo
-from .transcript_reader import TranscriptReader, render_transcript_batch
+from .transcript_reader import (
+    TranscriptReader,
+    observes_window_provider,
+    render_transcript_batch,
+)
 from .session_protocol.events import EventHub
 from .session_protocol.messages import TranscriptBatch
 from .utils import task_done_callback
@@ -556,12 +561,18 @@ class SessionMonitor:
         the shared-batch-checkpoint tie rule: persistence lags delivery by
         at most one in-flight batch); this coordinator groups receipts by
         session, keeps the pending-tool, tool-delivery, and pending-skip
-        fences, and persists one batched commit per cycle. The settled run is
+        fences, retires terminally failed receipts past the grace window
+        (delivery_contract.retire_aged_failures) so one failed send
+        cannot freeze its session until restart, and persists one batched
+        commit per cycle. The settled run is
         consumed even when the tie rule defers its commit: replay then
         re-delivers those messages, which at-least-once permits.
         """
         delivered_offsets: dict[str, int] = {}
         consumed: dict[str, int] = {}
+        emptied: list[str] = []
+        now = time.monotonic()
+        grace_s = config.failed_receipt_grace_s
         self._commit_pending_skips()
         for session_id, receipts in self._delivery_receipts.items():
             if (
@@ -569,6 +580,19 @@ class SessionMonitor:
                 or session_id in self.state.pending_skips
                 or session_id in self._pending_tools
             ):
+                continue
+            retired = retire_aged_failures(receipts, now=now, grace_s=grace_s)
+            if retired:
+                logger.warning(
+                    "Retired %d terminally failed delivery receipt(s) for %s;"
+                    " their bytes are a deliberate skip now (raw transcript"
+                    " kept, /history reaches them) so later settled delivery"
+                    " may commit",
+                    retired,
+                    session_id,
+                )
+            if not receipts:
+                emptied.append(session_id)
                 continue
             tool_fence = self._transcript_reader._tool_delivery_fences.get(session_id)
             if tool_fence is not None:
@@ -611,6 +635,10 @@ class SessionMonitor:
                 self._delivery_receipts[session_id] = remainder
             else:
                 self._delivery_receipts.pop(session_id, None)
+        for session_id in emptied:
+            # Retirement emptied the list; nothing registers inside this
+            # commit, so the dead entry can go now.
+            self._delivery_receipts.pop(session_id, None)
 
     def _reserve_replay_start(
         self, window_id: str, session_id: str, path: Path
@@ -644,7 +672,7 @@ class SessionMonitor:
         new_messages: list[NewMessage] = []
         sid_to_wid = {v["session_id"]: wid for wid, v in current_map.items()}
 
-        direct_sessions: list[tuple[str, Path]] = []
+        direct_sessions: list[tuple[str, Path, bool]] = []
         fallback_session_ids: set[str] = set()
 
         for window_id, details in current_map.items():
@@ -658,7 +686,7 @@ class SessionMonitor:
                 ):
                     continue
                 if path.exists():
-                    direct_sessions.append((session_id, path))
+                    direct_sessions.append((session_id, path, replay_from_start))
                     continue
                 if replay_from_start:
                     # The explicit hook path is authoritative. Scanning can
@@ -667,11 +695,14 @@ class SessionMonitor:
                     continue
             fallback_session_ids.add(session_id)
 
-        for session_id, file_path in direct_sessions:
+        for session_id, file_path, replay_from_start in direct_sessions:
             if session_id in self.state.pending_skips:
                 continue
             if await self._maybe_auto_backlog_skip(
-                session_id, file_path, sid_to_wid.get(session_id, "")
+                session_id,
+                file_path,
+                sid_to_wid.get(session_id, ""),
+                replay_from_start=replay_from_start,
             ):
                 continue
             try:
@@ -715,7 +746,12 @@ class SessionMonitor:
         return new_messages
 
     async def _maybe_auto_backlog_skip(
-        self, session_id: str, file_path: Path, window_id: str
+        self,
+        session_id: str,
+        file_path: Path,
+        window_id: str,
+        *,
+        replay_from_start: bool = False,
     ) -> bool:
         """Auto-trigger the upstream skip barrier when the gap exceeds the cap.
 
@@ -724,22 +760,52 @@ class SessionMonitor:
         disabled or no window bound the answer is always False, even for
         a barrier-pending session (check_for_updates pre-filters those).
         Resolution of (user, chat, thread) comes from the bound topic; an
-        unbound session is left alone.
+        unbound session is left alone. ``replay_from_start`` marks the
+        hook-authored explicit replay intent, which the cap never
+        defeats.
+
+        This check runs every poll for every tracked session, so it covers
+        both a wedge that grew while the bridge ran and the first pass
+        after a restart (monitor start) for sessions whose watermarks were
+        loaded from disk, plus tracking entry for a re-keyed session id
+        (the adoption below). It composes with the wake damper
+        (CCGRAM_BACKLOG_DAMP_KB) when that ships: both arm the same
+        BacklogSkipIntent barrier, the tighter threshold fires first, and
+        the loser stands down on the existing pending_skips check.
         """
         # Lazy: thread_router is wired into session_manager which imports
         # session_monitor; hoisting forms a startup cycle.
         from .thread_router import thread_router
 
-        if not _REPLAY_CAP_BYTES or not window_id:
+        if not _REPLAY_CAP_BYTES or not window_id or replay_from_start:
             return False
         if session_id in self.state.pending_skips:
             return True
         now = time.monotonic()
-        if now < self._auto_skip_retry_at.get(session_id, 0.0):
+        # The same provider gate the read path applies: a provider-pinned
+        # window must not get adoption or barrier side effects the
+        # monitor's own reads refuse.
+        if now < self._auto_skip_retry_at.get(session_id, 0.0) or (
+            not observes_window_provider(window_id, file_path)
+        ):
             return False
         try:
             session = self.state.get_session(session_id)
             if session is None:
+                # A re-keyed session (same transcript, new session id) carries
+                # its old watermark into tracking only inside the read path,
+                # which would replay the whole gap with no cap judgment.
+                # Adopt first so the cap sees the offset this entry will
+                # actually resume from (idempotent: the read path adopts too).
+                session = self._transcript_reader.adopt_tracking_for_file(
+                    session_id, file_path
+                )
+            if session is None:
+                # Still untracked (no adoption candidate): a session the
+                # reader will not track yet would otherwise re-walk every
+                # tracked session's resolved path each cycle. Damp the
+                # whole check; the read path adopts or seeds on its own.
+                self._damp_auto_skip(session_id, now)
                 return False
             gap = file_path.stat().st_size - session.last_byte_offset
             if gap <= _REPLAY_CAP_BYTES:
@@ -776,14 +842,16 @@ class SessionMonitor:
                 # unresolvable over-cap session would re-attempt (and
                 # re-write the state file) every poll cycle.
                 if intent is None:
-                    self._auto_skip_retry_at[session_id] = (
-                        time.monotonic() + _AUTO_SKIP_RETRY_SECONDS
-                    )
+                    self._damp_auto_skip(session_id, now)
                 return intent is not None or (session_id in self.state.pending_skips)
             return False
         except Exception:  # noqa: BLE001  # never break the poll loop
             logger.exception("auto backlog skip check failed for %s", session_id)
             return False
+
+    def _damp_auto_skip(self, session_id: str, now: float) -> None:
+        """Push the next automatic cap check one retry window out."""
+        self._auto_skip_retry_at[session_id] = now + _AUTO_SKIP_RETRY_SECONDS
 
     async def _process_session_file(
         self, session_id: str, file_path: Path, new_messages: list, window_id: str = ""

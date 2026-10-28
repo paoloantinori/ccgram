@@ -225,3 +225,107 @@ def test_settled_prefix_before_failure_commits(tmp_path):
 
     assert tracked.last_byte_offset == 50
     assert monitor._delivery_receipts["s1"] == [failed]
+
+
+def test_aged_failed_receipt_retires_and_settled_delivery_behind_commits(
+    tmp_path, monkeypatch
+):
+    """The 2026-10-28 freeze: one terminally failed send used to fence its
+    session's watermark for the rest of the process lifetime (nothing
+    retries those bytes in-process), so every restart replayed the whole
+    fenced range. Past the grace window the failure retires and receipts
+    settled behind it commit."""
+    from ccgram.config import config
+    from ccgram.session_monitor import SessionMonitor
+
+    monitor = SessionMonitor(projects_path=tmp_path, state_file=tmp_path / "ms.json")
+    tracked = TrackedSession(
+        session_id="s1", file_path="/x", last_byte_offset=10, parsed_offset=150
+    )
+    monitor.state.update_session(tracked)
+    ok = DeliveryReceipt(checkpoint=50)
+    ok.track()
+    ok.close()
+    ok.settle(DeliveryOutcome.DELIVERED)
+    failed = DeliveryReceipt(checkpoint=90)
+    failed.track()
+    failed.close()
+    failed.settle(DeliveryOutcome.FAILED)
+    failed.failed_at = 0.0  # aged far past any grace
+    later = DeliveryReceipt(checkpoint=150)
+    later.track()
+    later.close()
+    later.settle(DeliveryOutcome.DELIVERED)
+    monitor._delivery_receipts["s1"] = [ok, failed, later]
+
+    monkeypatch.setattr(config, "failed_receipt_grace_s", 300.0)
+    monitor.commit_delivered_watermarks()
+
+    assert tracked.last_byte_offset == 150
+    # The whole run committed, so the session's receipt list is gone.
+    assert "s1" not in monitor._delivery_receipts
+
+
+def test_fresh_failed_receipt_still_fences(tmp_path, monkeypatch):
+    """Inside the grace window the at-least-once fence is unchanged: the
+    failed bytes stay replayable for a near-term restart."""
+    from ccgram.config import config
+    from ccgram.session_monitor import SessionMonitor
+
+    monitor = SessionMonitor(projects_path=tmp_path, state_file=tmp_path / "ms.json")
+    tracked = TrackedSession(
+        session_id="s1", file_path="/x", last_byte_offset=10, parsed_offset=90
+    )
+    monitor.state.update_session(tracked)
+    failed = DeliveryReceipt(checkpoint=90)
+    failed.track()
+    failed.close()
+    failed.settle(DeliveryOutcome.FAILED)  # stamps failed_at = now
+    monitor._delivery_receipts["s1"] = [failed]
+
+    monkeypatch.setattr(config, "failed_receipt_grace_s", 300.0)
+    monitor.commit_delivered_watermarks()
+
+    assert tracked.last_byte_offset == 10
+    assert monitor._delivery_receipts["s1"] == [failed]
+
+
+def test_zero_grace_keeps_the_permanent_fence(tmp_path, monkeypatch):
+    """CCGRAM_FAILED_RECEIPT_GRACE_S=0 restores the pre-fix contract: a
+    failed receipt fences until restart."""
+    from ccgram.config import config
+    from ccgram.session_monitor import SessionMonitor
+
+    monitor = SessionMonitor(projects_path=tmp_path, state_file=tmp_path / "ms.json")
+    tracked = TrackedSession(
+        session_id="s1", file_path="/x", last_byte_offset=10, parsed_offset=150
+    )
+    monitor.state.update_session(tracked)
+    failed = DeliveryReceipt(checkpoint=90)
+    failed.track()
+    failed.close()
+    failed.settle(DeliveryOutcome.FAILED)
+    failed.failed_at = 0.0
+    monitor._delivery_receipts["s1"] = [failed]
+
+    monkeypatch.setattr(config, "failed_receipt_grace_s", 0.0)
+    monitor.commit_delivered_watermarks()
+
+    assert tracked.last_byte_offset == 10
+
+
+def test_failure_paths_stamp_the_retirement_clock():
+    settle_failed = DeliveryReceipt(checkpoint=10)
+    settle_failed.track()
+    settle_failed.close()
+    settle_failed.settle(DeliveryOutcome.FAILED)
+    producer_failed = DeliveryReceipt(checkpoint=20)
+    producer_failed.fail()
+
+    assert settle_failed.failed_at is not None
+    assert producer_failed.failed_at is not None
+    delivered = DeliveryReceipt(checkpoint=30)
+    delivered.track()
+    delivered.close()
+    delivered.settle(DeliveryOutcome.DELIVERED)
+    assert delivered.failed_at is None

@@ -308,6 +308,21 @@ def _tail_marker(file_path: Path, offset: int) -> bytes:
         return transcript.read(offset - start)
 
 
+def observes_window_provider(window_id: str, file_path: Path) -> bool:
+    """The provider-observation gate every tracking side effect must pass.
+
+    A manual /agent choice stays authoritative: when the window is pinned
+    to a provider the observed transcript does not match, the answer is
+    False and callers must not adopt, seed, or read tracking state.
+    """
+    provider = _resolve_provider_for_file(window_id, file_path)
+    provider_name = (
+        detect_provider_from_transcript_path(str(file_path))
+        or provider.capabilities.name
+    )
+    return identity_state.accepts_provider_observation(window_id, provider_name)
+
+
 def _resolve_provider_for_file(window_id: str, file_path: Path) -> Any:
     """Prefer transcript-path provider hints when a hookful state goes stale."""
     provider_name: str | None = None
@@ -856,10 +871,16 @@ class TranscriptReader:
             batch for batch in self._pending_batches if batch.session_id != session_id
         ]
 
-    def _adopt_tracking_for_file(
+    def adopt_tracking_for_file(
         self, session_id: str, file_path: Path
     ) -> TrackedSession | None:
-        """Move offset state when the same transcript appears under a refreshed id."""
+        """Move offset state when the same transcript appears under a refreshed id.
+
+        Public because the monitor's replay-cap check also calls it: a
+        re-keyed entry must be cap-judged on the watermark it will resume
+        from, before the read path replays the carried gap. Idempotent
+        with the read path's own adoption.
+        """
         try:
             target = file_path.resolve()
         except _PathResolveError:
@@ -998,16 +1019,16 @@ class TranscriptReader:
     ) -> None:
         """Process a single session file for new messages."""
         tracked = self._state.get_session(session_id)
+        if not observes_window_provider(window_id, file_path):
+            return
         provider = _resolve_provider_for_file(window_id, file_path)
         provider_name = (
             detect_provider_from_transcript_path(str(file_path))
             or provider.capabilities.name
         )
-        if not identity_state.accepts_provider_observation(window_id, provider_name):
-            return
 
         if tracked is None:
-            tracked = self._adopt_tracking_for_file(session_id, file_path)
+            tracked = self.adopt_tracking_for_file(session_id, file_path)
 
         if tracked is None:
             await self._start_tracking_session(

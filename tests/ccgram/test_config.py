@@ -4,7 +4,9 @@ import pytest
 
 from ccgram.config import (
     Config,
+    _delivery_watch_escalate_s,
     _delivery_watch_gap_bytes,
+    _failed_receipt_grace_s,
     _skip_barrier_deadline_s,
 )
 
@@ -343,3 +345,41 @@ class TestDeliveryWatchGap:
     def test_invalid_values_fall_back(self, monkeypatch, raw) -> None:
         monkeypatch.setenv("CCGRAM_DELIVERY_WATCH_GAP_KB", raw)
         assert _delivery_watch_gap_bytes() == 256 * 1024
+
+
+class TestFailedReceiptGrace:
+    def test_default_when_unset(self, monkeypatch) -> None:
+        monkeypatch.delenv("CCGRAM_FAILED_RECEIPT_GRACE_S", raising=False)
+        assert _failed_receipt_grace_s() == 300.0
+
+    def test_override_honored(self, monkeypatch) -> None:
+        monkeypatch.setenv("CCGRAM_FAILED_RECEIPT_GRACE_S", "60")
+        assert _failed_receipt_grace_s() == 60.0
+
+    def test_zero_keeps_permanent_fence(self, monkeypatch) -> None:
+        monkeypatch.setenv("CCGRAM_FAILED_RECEIPT_GRACE_S", "0")
+        assert _failed_receipt_grace_s() == 0.0
+
+    @pytest.mark.parametrize("raw", ["", "abc", "10s", "inf", "nan"])
+    def test_invalid_values_fall_back(self, monkeypatch, raw) -> None:
+        monkeypatch.setenv("CCGRAM_FAILED_RECEIPT_GRACE_S", raw)
+        assert _failed_receipt_grace_s() == 300.0
+
+
+class TestDeliveryWatchEscalate:
+    def test_default_when_unset(self, monkeypatch) -> None:
+        monkeypatch.delenv("CCGRAM_DELIVERY_WATCH_ESCALATE_MIN", raising=False)
+        assert _delivery_watch_escalate_s() == 3600.0
+
+    def test_override_honored_in_minutes(self, monkeypatch) -> None:
+        monkeypatch.setenv("CCGRAM_DELIVERY_WATCH_ESCALATE_MIN", "2")
+        assert _delivery_watch_escalate_s() == 120.0
+
+    def test_zero_disables(self, monkeypatch) -> None:
+        monkeypatch.setenv("CCGRAM_DELIVERY_WATCH_ESCALATE_MIN", "0")
+        assert _delivery_watch_escalate_s() == 0.0
+
+    @pytest.mark.parametrize("raw", ["", "abc", "10m", "inf", "nan"])
+    def test_invalid_values_fall_back(self, monkeypatch, raw) -> None:
+        monkeypatch.setenv("CCGRAM_DELIVERY_WATCH_ESCALATE_MIN", raw)
+        assert _delivery_watch_escalate_s() == 3600.0

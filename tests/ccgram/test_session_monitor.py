@@ -2855,6 +2855,236 @@ async def test_check_for_updates_zero_cap_still_reads(tmp_path) -> None:
     assert "sess-ok" in read_session_ids
 
 
+def _wire_restart_cap_monitor(
+    tmp_path,
+    monkeypatch,
+    *,
+    tracked: TrackedSession | None,
+    session_id: str,
+) -> tuple[SessionMonitor, list[BacklogSkipIntent]]:
+    """Monitor wired like a bridge start: bound topic, skip callbacks, map."""
+    import ccgram.thread_router as tr_mod
+    from ccgram.delivery_contract import get_active_delivery_receipt
+
+    monitor = SessionMonitor(
+        projects_path=tmp_path / "projects",
+        state_file=tmp_path / "ms.json",
+    )
+    if tracked is not None:
+        monitor.state.update_session(tracked)
+    monitor._last_session_map = {"@7": {"session_id": session_id}}
+    notices: list[BacklogSkipIntent] = []
+
+    async def purge(_intent) -> int:
+        return 0
+
+    async def notice(intent) -> None:
+        notices.append(intent)
+        receipt = get_active_delivery_receipt()
+        assert receipt is not None
+        receipt.track()
+
+    monitor.set_skip_callbacks(
+        purge=purge, notice=notice, validate=lambda _intent: True
+    )
+    router = SimpleNamespace(
+        iter_thread_bindings_with_chat=lambda: iter([(1, -100900, 42, "@7")]),
+        resolve_chat_id=lambda user_id, thread_id: -100900,
+    )
+    monkeypatch.setattr(tr_mod, "thread_router", router)
+    return monitor, notices
+
+
+def _current_map(session_id: str, transcript_path) -> dict:
+    return {
+        "@7": {
+            "session_id": session_id,
+            "cwd": "/proj",
+            "window_name": "proj",
+            "transcript_path": str(transcript_path),
+        },
+    }
+
+
+async def test_restart_gap_over_cap_arms_barrier_and_replays_nothing(
+    tmp_path, monkeypatch
+) -> None:
+    """The restart cap end to end: a 5 MB undelivered gap on a watermark
+    loaded from disk arms the skip barrier, enqueues exactly one notice,
+    and replays zero batches (2026-10-28 incident)."""
+    import ccgram.session_monitor as sm_mod
+    from ccgram.delivery_contract import DeliveryOutcome
+
+    session_file = tmp_path / "transcript.jsonl"
+    with session_file.open("wb") as f:
+        f.truncate(5_000_000)
+    monitor, notices = _wire_restart_cap_monitor(
+        tmp_path,
+        monkeypatch,
+        tracked=TrackedSession(
+            session_id="sess-big",
+            file_path=str(session_file),
+            last_byte_offset=1_000,
+        ),
+        session_id="sess-big",
+    )
+    delivered = AsyncMock()
+    monitor.set_message_callback(delivered)
+
+    original_cap = sm_mod._REPLAY_CAP_BYTES
+    sm_mod._REPLAY_CAP_BYTES = 1_000_000
+    try:
+        await monitor.check_for_updates(_current_map("sess-big", session_file))
+        batches = monitor._transcript_reader.drain_batches()
+    finally:
+        sm_mod._REPLAY_CAP_BYTES = original_cap
+
+    assert "sess-big" in monitor.state.pending_skips
+    assert len(notices) == 1
+    assert batches == ()
+    delivered.assert_not_called()
+    # The barrier completes once its notice is acknowledged: watermark at
+    # EOF, transcript untouched.
+    monitor._skip_notice_receipts["sess-big"].settle(DeliveryOutcome.DELIVERED)
+    monitor.commit_delivered_watermarks()
+    assert monitor.state.get_session("sess-big").last_byte_offset == 5_000_000  # type: ignore[union-attr]
+    assert "sess-big" not in monitor.state.pending_skips
+    assert session_file.stat().st_size == 5_000_000
+
+
+async def test_restart_gap_under_cap_replays_normally(tmp_path, monkeypatch) -> None:
+    """A 0.5 MB gap with the default 1 MB cap replays through the normal
+    at-least-once path: no barrier, no notice, batches dispatched."""
+    import ccgram.session_monitor as sm_mod
+
+    line = (
+        json.dumps(
+            {
+                "type": "assistant",
+                "message": {"content": [{"type": "text", "text": "hi"}]},
+            }
+        )
+        + "\n"
+    )
+    session_file = tmp_path / "transcript.jsonl"
+    with session_file.open("wb") as f:
+        f.write(line.encode() * 8_000)  # ~0.6 MB of entries
+    monitor, notices = _wire_restart_cap_monitor(
+        tmp_path,
+        monkeypatch,
+        tracked=TrackedSession(
+            session_id="sess-ok",
+            file_path=str(session_file),
+            last_byte_offset=100_000,
+        ),
+        session_id="sess-ok",
+    )
+
+    original_cap = sm_mod._REPLAY_CAP_BYTES
+    sm_mod._REPLAY_CAP_BYTES = 1_000_000
+    try:
+        with patch(
+            "ccgram.transcript_reader._resolve_provider_for_file",
+            return_value=ClaudeProvider(),
+        ):
+            await monitor.check_for_updates(_current_map("sess-ok", session_file))
+        batches = monitor._transcript_reader.drain_batches()
+    finally:
+        sm_mod._REPLAY_CAP_BYTES = original_cap
+
+    assert "sess-ok" not in monitor.state.pending_skips
+    assert batches != ()
+    assert notices == []
+
+
+async def test_rekeyed_session_is_cap_judged_at_tracking_entry(
+    tmp_path, monkeypatch
+) -> None:
+    """A re-keyed session id adopts the old watermark inside the read
+    path; without the adoption hoist the carried gap would replay with no
+    cap judgment at all."""
+    import ccgram.session_monitor as sm_mod
+
+    session_file = tmp_path / "transcript.jsonl"
+    with session_file.open("wb") as f:
+        f.truncate(5_000_000)
+    monitor, notices = _wire_restart_cap_monitor(
+        tmp_path,
+        monkeypatch,
+        tracked=TrackedSession(
+            session_id="sess-old",
+            file_path=str(session_file),
+            last_byte_offset=1_000,
+        ),
+        session_id="sess-new",
+    )
+    delivered = AsyncMock()
+    monitor.set_message_callback(delivered)
+
+    original_cap = sm_mod._REPLAY_CAP_BYTES
+    sm_mod._REPLAY_CAP_BYTES = 1_000_000
+    try:
+        await monitor.check_for_updates(_current_map("sess-new", session_file))
+        batches = monitor._transcript_reader.drain_batches()
+    finally:
+        sm_mod._REPLAY_CAP_BYTES = original_cap
+
+    assert "sess-new" in monitor.state.pending_skips
+    assert "sess-old" not in monitor.state.tracked_sessions
+    assert batches == ()
+    delivered.assert_not_called()
+    assert len(notices) == 1
+
+
+async def test_replay_from_start_marker_is_never_capped(tmp_path, monkeypatch) -> None:
+    """The hook-authored replay-from-start intent (session_map flag,
+    offset zero) is an explicit request, not a grew-while-down gap; the
+    cap must not defeat it. A zero watermark WITHOUT the flag stays
+    capped (the wiring test pins that with offset 0)."""
+    import ccgram.session_monitor as sm_mod
+
+    line = (
+        json.dumps(
+            {
+                "type": "assistant",
+                "message": {"content": [{"type": "text", "text": "hi"}]},
+            }
+        )
+        + "\n"
+    )
+    session_file = tmp_path / "transcript.jsonl"
+    session_file.write_text(line * 200)  # > cap below
+    monitor, notices = _wire_restart_cap_monitor(
+        tmp_path,
+        monkeypatch,
+        tracked=TrackedSession(
+            session_id="sess-replay",
+            file_path=str(session_file),
+            last_byte_offset=0,
+        ),
+        session_id="sess-replay",
+    )
+    monkeypatch.setattr(sm_mod, "acknowledge_replay_from_start", lambda *a: True)
+
+    original_cap = sm_mod._REPLAY_CAP_BYTES
+    sm_mod._REPLAY_CAP_BYTES = 1_000
+    try:
+        current_map = _current_map("sess-replay", session_file)
+        current_map["@7"]["replay_from_start"] = True
+        with patch(
+            "ccgram.transcript_reader._resolve_provider_for_file",
+            return_value=ClaudeProvider(),
+        ):
+            await monitor.check_for_updates(current_map)
+        batches = monitor._transcript_reader.drain_batches()
+    finally:
+        sm_mod._REPLAY_CAP_BYTES = original_cap
+
+    assert "sess-replay" not in monitor.state.pending_skips
+    assert batches != ()
+    assert notices == []
+
+
 class TestReadNewLines:
     async def test_shrunken_file_resumes_from_eof_no_replay(self, tmp_path) -> None:
         """Shrunken/replaced transcripts must not be replayed (2026-08-17

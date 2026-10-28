@@ -93,6 +93,35 @@ def _replay_cap_bytes() -> int:
         return 1_000_000
 
 
+def _failed_receipt_grace_s() -> float:
+    """Seconds a terminally failed delivery receipt may fence its session's
+    watermark before it is retired (bytes become a deliberate skip; the
+    transcript keeps them for /history). 0 keeps the permanent fence.
+    Tolerant of empty or non-numeric input so a bad env value cannot
+    break startup."""
+    try:
+        value = float(os.getenv("CCGRAM_FAILED_RECEIPT_GRACE_S") or 300.0)
+    except ValueError:
+        return 300.0
+    if not math.isfinite(value):
+        return 300.0
+    return max(0.0, value)
+
+
+def _delivery_watch_escalate_s() -> float:
+    """Minutes a delivery wedge must persist before escalation (a WARNING
+    journal line every gate pass plus one direct maintainer notice), in
+    seconds. 0 disables escalation. Tolerant of empty or non-numeric
+    input so a bad env value cannot break startup."""
+    try:
+        value = float(os.getenv("CCGRAM_DELIVERY_WATCH_ESCALATE_MIN") or 60.0)
+    except ValueError:
+        return 3600.0
+    if not math.isfinite(value):
+        return 3600.0
+    return max(0.0, value * 60.0)
+
+
 def _whisper_timeout_s() -> float:
     """Seconds before the transcription POST gives up, floored at 1s and
     tolerant of empty, non-numeric, or non-finite input (inf would disable
@@ -168,6 +197,8 @@ class Config:
         self.skip_barrier_deadline_s = _skip_barrier_deadline_s()
         self.delivery_watch_gap_bytes = _delivery_watch_gap_bytes()
         self.replay_cap_bytes = _replay_cap_bytes()
+        self.failed_receipt_grace_s = _failed_receipt_grace_s()
+        self.delivery_watch_escalate_s = _delivery_watch_escalate_s()
         # Orphaned-binding watchdog (2026-10-28 incident: hermes-fleet
         # topics sat mute for two days after their session_map entries
         # died while the windows stayed live). CCGRAM_ORPHAN_WATCH=0

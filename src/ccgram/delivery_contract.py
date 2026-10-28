@@ -10,6 +10,7 @@ nothing about Telegram, handlers, queues, or session monitoring.
 
 from __future__ import annotations
 
+import time
 from contextvars import ContextVar, Token
 from dataclasses import dataclass
 from enum import Enum
@@ -25,12 +26,17 @@ class DeliveryOutcome(Enum):
 
 @dataclass
 class DeliveryReceipt:
-    """Acknowledgement for all outbound tasks created from one transcript item."""
+    """Acknowledgement for all outbound tasks created from one transcript item.
+
+    ``failed_at`` is the single failure source: a monotonic stamp when the
+    receipt failed (queue settle or producer side), ``None`` while it has
+    not. ``failed`` derives from it.
+    """
 
     checkpoint: int | None = None
     _pending: int = 0
     _closed: bool = False
-    failed: bool = False
+    failed_at: float | None = None
 
     def track(self) -> None:
         if self._closed:
@@ -42,18 +48,22 @@ class DeliveryReceipt:
             raise RuntimeError("delivery receipt settled without queued work")
         self._pending -= 1
         if outcome is DeliveryOutcome.FAILED:
-            self.failed = True
+            self.failed_at = time.monotonic()
 
     def fail(self) -> None:
         """Record a producer-side failure that prevented safe enqueueing."""
-        self.failed = True
+        self.failed_at = time.monotonic()
 
     def close(self) -> None:
         self._closed = True
 
     @property
+    def failed(self) -> bool:
+        return self.failed_at is not None
+
+    @property
     def commit_ready(self) -> bool:
-        return self._closed and self._pending == 0 and not self.failed
+        return self._closed and self._pending == 0 and self.failed_at is None
 
 
 _active_receipt: ContextVar[DeliveryReceipt | None] = ContextVar(
@@ -141,3 +151,37 @@ def settled_run_offset(
         if checkpoint < fence_checkpoint:
             return checkpoint
     return None
+
+
+def retire_aged_failures(
+    receipts: list[DeliveryReceipt], *, now: float, grace_s: float
+) -> int:
+    """Drop terminally failed receipts older than ``grace_s``, in place.
+
+    A failed receipt fences the watermark so its bytes stay replayable.
+    Left in place forever, one failed send freezes its session's durable
+    progress for the rest of the process lifetime (nothing retries the
+    bytes in-process), and the next restart replays the whole fenced
+    range as a flood (incident 2026-10-28). Past the grace window the
+    failure is retired instead: its bytes become a deliberate skip, the
+    raw transcript keeps them for /history, and receipts settled behind
+    the failure may commit. ``grace_s <= 0`` disables retirement and
+    keeps the permanent fence. Returns how many receipts were dropped.
+    """
+    if grace_s <= 0:
+        return 0
+    if not any(receipt.failed for receipt in receipts):
+        return 0
+    kept = [
+        receipt
+        for receipt in receipts
+        if not receipt.failed
+        or (
+            receipt.failed_at is not None  # narrows the property correlation
+            and now - receipt.failed_at < grace_s
+        )
+    ]
+    dropped = len(receipts) - len(kept)
+    if dropped:
+        receipts[:] = kept
+    return dropped
