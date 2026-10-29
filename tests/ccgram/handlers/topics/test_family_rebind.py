@@ -56,6 +56,23 @@ class TestFindFamilyMatch:
             is None
         )
 
+    def test_two_bindings_same_old_window_match_first(self) -> None:
+        # One logical window carries one topic per chat (the multi-chat
+        # adoption shape): the binding rows dedup to one family member
+        # and the rebind may fire, instead of refusing as ambiguous.
+        twin = FamilyBinding(
+            user_id=_USER,
+            chat_id=-100201,
+            thread_id=43,
+            old_window_id="@old-a",
+            cwd=_CWD,
+            provider="claude",
+        )
+        assert (
+            find_family_match(_CWD, "claude", [_binding("@old-a"), twin]).old_window_id
+            == "@old-a"
+        )
+
     def test_provider_mismatch_matches_none(self) -> None:
         assert find_family_match(_CWD, "claude", [_binding(provider="codex")]) is None
 
@@ -359,26 +376,3 @@ class TestFamilyRebindFlow:
         assert client.call_count("create_forum_topic") == 0
         assert client.call_count("send_message") == 0
         assert harness.router.chat_thread_bindings[(_USER, _CHAT, _THREAD)] == _NEW
-
-    async def test_zz_debug_mixed(self, harness) -> None:
-        harness.bind("@dead")
-        harness.cwds.update({"@dead": _CWD, "@live": _CWD})
-        harness.providers.update({"@dead": "claude", "@live": "claude"})
-        bot = _create_bot()
-        from ccgram.thread_router import thread_router as _tr
-        print(
-            "DEBUG has_window('@dead'):",
-            _tr.has_window("@dead"),
-            "| bindings:",
-            dict(harness.router.chat_thread_bindings),
-        )
-
-        adopted = await handle_new_window(
-            _event(), bot, live_windows=[_ref("@dead"), _ref(_NEW)]
-        )
-
-        print("DEBUG adopted:", adopted)
-        print("DEBUG create_forum_topic calls:", bot.create_forum_topic.call_count)
-        assert bot.create_forum_topic.call_count == 1
-        assert harness.router.chat_thread_bindings[(_USER, _CHAT, _THREAD)] == "@dead"
-        assert harness.router.chat_thread_bindings[(_USER, _CHAT, _THREAD)] == "@dead"

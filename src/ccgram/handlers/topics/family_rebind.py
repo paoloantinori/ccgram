@@ -89,22 +89,27 @@ def find_family_match(
 ) -> FamilyBinding | None:
     """The one dead binding from the same (cwd, provider) family, or None.
 
-    An ambiguous workspace (two dead topics on the same directory) must
-    keep today's behavior, a new topic, rather than guess which topic to
-    take over. An unknown new cwd or provider identifies no family. The
-    provider compares casefolded as a defense; labels are canonical
-    lowercase in practice, unlike the fold's exact compare over hook
-    written entries.
+    An ambiguous workspace (two dead bindings on the same directory after
+    dedup by old window id) must keep today's behavior, a new topic,
+    rather than guess which topic to take over. An unknown new cwd or
+    provider identifies no family. The provider compares casefolded as a
+    defense; labels are canonical lowercase in practice, unlike the fold's
+    exact compare over hook written entries.
     """
     if not new_cwd or not new_provider:
         return None
-    family = [
-        binding
-        for binding in bindings
-        if binding.cwd == new_cwd
-        and binding.provider
-        and binding.provider.casefold() == new_provider.casefold()
-    ]
+    seen_windows: set[str] = set()
+    family: list[FamilyBinding] = []
+    for binding in bindings:
+        if binding.old_window_id in seen_windows:
+            continue  # one topic per chat for the same window: one member
+        seen_windows.add(binding.old_window_id)
+        if (
+            binding.cwd == new_cwd
+            and binding.provider
+            and binding.provider.casefold() == new_provider.casefold()
+        ):
+            family.append(binding)
     return family[0] if len(family) == 1 else None
 
 
