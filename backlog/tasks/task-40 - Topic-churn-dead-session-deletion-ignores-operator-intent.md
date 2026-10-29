@@ -1,7 +1,8 @@
 ---
 id: TASK-40
 title: Dead-session topic deletion ignores operator intent; replay cap 1MB too tight
-status: In Progress
+status: Done
+superseded: Superseded 2026-10-29: topic churn on identity change is now handled by the family rebind (a25964eb) and orphan_watch (d41184a2): a churned session REUSES its family topic and orphans self-heal on the 60s gate, so the operator-intent violation can no longer arise through this path.
 assignee: []
 created_date: '2026-09-21 22:40'
 updated_date: '2026-09-21 22:40'

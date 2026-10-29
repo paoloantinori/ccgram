@@ -1,7 +1,8 @@
 ---
 id: TASK-39
 title: Shepherd upstream PRs 263/264/265 (issues 260/261/262) to merge
-status: In Progress
+status: Done
+superseded: Superseded 2026-10-29: PR #344 (system-role) is open on upstream and being reviewed; PRs 260-265 era closed/withdrawn upstream long ago. Shepherd work is done or moot.
 assignee: []
 created_date: '2026-09-20 22:52'
 updated_date: '2026-09-20 22:52'
