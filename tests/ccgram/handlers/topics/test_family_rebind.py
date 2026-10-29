@@ -359,3 +359,26 @@ class TestFamilyRebindFlow:
         assert client.call_count("create_forum_topic") == 0
         assert client.call_count("send_message") == 0
         assert harness.router.chat_thread_bindings[(_USER, _CHAT, _THREAD)] == _NEW
+
+    async def test_zz_debug_mixed(self, harness) -> None:
+        harness.bind("@dead")
+        harness.cwds.update({"@dead": _CWD, "@live": _CWD})
+        harness.providers.update({"@dead": "claude", "@live": "claude"})
+        bot = _create_bot()
+        from ccgram.thread_router import thread_router as _tr
+        print(
+            "DEBUG has_window('@dead'):",
+            _tr.has_window("@dead"),
+            "| bindings:",
+            dict(harness.router.chat_thread_bindings),
+        )
+
+        adopted = await handle_new_window(
+            _event(), bot, live_windows=[_ref("@dead"), _ref(_NEW)]
+        )
+
+        print("DEBUG adopted:", adopted)
+        print("DEBUG create_forum_topic calls:", bot.create_forum_topic.call_count)
+        assert bot.create_forum_topic.call_count == 1
+        assert harness.router.chat_thread_bindings[(_USER, _CHAT, _THREAD)] == "@dead"
+        assert harness.router.chat_thread_bindings[(_USER, _CHAT, _THREAD)] == "@dead"

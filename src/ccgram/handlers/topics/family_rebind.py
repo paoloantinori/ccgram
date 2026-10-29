@@ -205,6 +205,21 @@ async def _family_decision(
     match = find_family_match(new_ref.cwd or event.cwd, new_provider, bindings)
     if match is None:
         return None
+    # The family already served by a live topic? A live same-cwd window
+    # means another topic owns that workspace right now: rebinding the
+    # dead one would leave two same-family topics, the duplicate shape
+    # this heal exists to prevent. Fall through to a new topic.
+    # Lazy: thread_router is wired into session_manager which imports
+    # session_monitor; hoisting forms a startup cycle.
+    from ...thread_router import thread_router
+
+    if any(
+        thread_router.has_window(canonical_window_id(w.window_id))
+        for w in windows
+        if w.cwd == (new_ref.cwd or event.cwd)
+        and canonical_window_id(w.window_id) != new_key
+    ):
+        return None
     return new_entry, new_provider, match
 
 
