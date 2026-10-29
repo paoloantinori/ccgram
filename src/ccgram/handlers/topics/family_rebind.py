@@ -35,6 +35,7 @@ promises no replay at all.
 from __future__ import annotations
 
 import asyncio
+import os
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
@@ -213,18 +214,19 @@ async def _family_decision(
     # The family already served by a live topic? A live same-cwd window
     # means another topic owns that workspace right now: rebinding the
     # dead one would leave two same-family topics, the duplicate shape
-    # this heal exists to prevent. Fall through to a new topic.
-    # Lazy: thread_router is wired into session_manager which imports
-    # session_monitor; hoisting forms a startup cycle.
-    from ...thread_router import thread_router
-
-    if any(
-        thread_router.has_window(canonical_window_id(w.window_id))
-        for w in windows
-        if w.cwd == (new_ref.cwd or event.cwd)
-        and canonical_window_id(w.window_id) != new_key
-    ):
-        return None
+    # this heal exists to prevent. Fall through to a new topic. The
+    # sibling check keys on the BOUND window's stored family facts, not
+    # the listing cwd: a backend can emit an empty cwd for a live record
+    # (herdr does when the agent.list record lacks one), and a listing
+    # spelling that differs from the hook-written cwd must not let a
+    # live sibling slip past the guard either.
+    for w in windows:
+        w_key = canonical_window_id(w.window_id)
+        if w_key == new_key or not thread_router.has_window(w_key):
+            continue
+        sibling_cwd = identity_state.get_cwd(w_key)
+        if sibling_cwd == (new_ref.cwd or event.cwd):
+            return None
     return new_entry, new_provider, match
 
 
@@ -281,8 +283,7 @@ async def maybe_rebind_family_topic(
             match.thread_id,
             event.window_id,
             match.chat_id,
-            thread_router.get_display_name(match.old_window_id)
-            or _default_topic_name(event),
+            _default_topic_name(event),
         )
         session_manager.flush_state()
         logger.info(
@@ -300,7 +301,15 @@ async def maybe_rebind_family_topic(
     chat_id = match.chat_id
     if chat_id is None:
         chat_id = resolve_chat_id(match.user_id, match.thread_id)
-    if skipped_bytes is not None:
+    # skipped_bytes is 0 both when the transcript is already at EOF and
+    # when it does not exist yet (the seed registers offset 0 for a
+    # ghost file); only a file that exists may promise a skip, otherwise
+    # the notice must stay pending-shaped or it would assert a skip the
+    # monitor will not honor when the file appears.
+    seeded_at_existing_file = skipped_bytes is not None and os.path.exists(
+        transcript_path
+    )
+    if seeded_at_existing_file:
         text = REBOUND_TEXT.format(
             old=match.old_window_id, new=event.window_id, skipped=skipped_bytes
         )

@@ -376,3 +376,30 @@ class TestFamilyRebindFlow:
         assert client.call_count("create_forum_topic") == 0
         assert client.call_count("send_message") == 0
         assert harness.router.chat_thread_bindings[(_USER, _CHAT, _THREAD)] == _NEW
+
+
+class TestLiveSiblingGuard:
+    """The a25964eb guard: a live same-family topic blocks the rebind.
+
+    The sibling's identity comes from the BOUND window's stored facts, not
+    the listing cwd: a backend can emit an empty cwd for a live record
+    and the guard must still see the sibling.
+    """
+
+    async def test_live_sibling_blocks_rebind(self, harness) -> None:
+        # A DEAD binding exists to rebind (old window, absent from the
+        # listing) AND a live same-family sibling is BOUND on another
+        # thread whose listing cwd is EMPTY: the guard must key on the
+        # sibling's stored cwd and block the rebind anyway.
+        harness.bind("@dead")
+        harness.bind("@live", thread_id=77)
+        harness.cwds.update({"@live": _CWD, "@dead": _CWD})
+        harness.providers.update({"@live": "claude", "@dead": "claude"})
+        bot = _create_bot()
+
+        adopted = await handle_new_window(
+            _event(), bot, live_windows=[_ref("@live", cwd=""), _ref(_NEW)]
+        )
+
+        assert adopted is True
+        bot.create_forum_topic.assert_called_once()
