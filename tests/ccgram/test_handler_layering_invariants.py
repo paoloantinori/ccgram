@@ -126,6 +126,12 @@ _SINGLETON_ALLOWLIST = frozenset(
         "toolbar/toolbar_callbacks.py",
         "topics/directory_browser.py",
         "topics/directory_callbacks.py",
+        # family_rebind rewrites a topic binding onto the reopened window
+        # (thread_router.bind_thread, same write as topic_orchestration) and
+        # reads the old binding's display name; its two router READS go
+        # through session_query. Monitor seeding goes through
+        # SessionMonitor.seed_session_offset_at_eof.
+        "topics/family_rebind.py",
         # provider_mode_callbacks uses thread_router for the double-click guard
         # (same routing pattern as directory_callbacks).
         "topics/provider_mode_callbacks.py",

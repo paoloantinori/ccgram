@@ -44,9 +44,9 @@ from .topic_orchestration import (
     adopt_unbound_windows,
     clear_topic_create_retry,
     collect_target_chats,
+    confirmed_adoption_listing,
     create_topic_in_chat,
     handle_new_window,
-    still_adoptable,
 )
 from .window_callbacks import handle_window_callback
 
@@ -72,11 +72,11 @@ __all__ = [
     "clear_topic_create_retry",
     "clear_window_picker_state",
     "collect_target_chats",
+    "confirmed_adoption_listing",
     "create_topic_in_chat",
     "get_favorites",
     "handle_directory_callback",
     "handle_new_window",
-    "still_adoptable",
     "handle_window_callback",
     "new_command",
     "probe_topic_existence",

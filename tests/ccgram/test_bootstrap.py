@@ -462,17 +462,23 @@ class TestNewWindowCallbackChecksEligibility:
         return instance.set_new_window_callback.call_args[0][0]
 
     async def _run(self, *, adoptable: bool):
+        from ccgram.multiplexer.base import WindowRef
         from ccgram.session_monitor import NewWindowEvent
 
         app = _make_app()
         bootstrap.wire_runtime_callbacks()
         callback = await self._callback(app)
+        listing = (
+            [WindowRef(window_id="@5", window_name="proj", cwd="/proj")]
+            if adoptable
+            else None
+        )
 
         with (
             patch(
-                "ccgram.bootstrap._still_adoptable",
+                "ccgram.bootstrap._confirmed_adoption_listing",
                 new_callable=AsyncMock,
-                return_value=adoptable,
+                return_value=listing,
             ),
             patch(
                 "ccgram.bootstrap._handle_new_window",
@@ -489,6 +495,10 @@ class TestNewWindowCallbackChecksEligibility:
     async def test_adoptable_window_gets_a_topic(self):
         handle = await self._run(adoptable=True)
         handle.assert_awaited_once()
+        # The confirmed listing is handed to the adoption itself so the
+        # family-rebind check reuses the same liveness truth.
+        assert handle.await_args is not None
+        assert handle.await_args.kwargs["live_windows"] is not None
 
     async def test_window_that_is_no_longer_adoptable_gets_none(self):
         handle = await self._run(adoptable=False)

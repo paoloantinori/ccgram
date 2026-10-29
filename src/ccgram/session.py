@@ -283,7 +283,10 @@ class SessionManager:
         so the durable link is the workspace: a dead digest whose
         (cwd, provider) matches exactly one LIVE digest is a
         supersession the file attests by itself. Ambiguous workspaces
-        (several live windows on the same cwd) are never folded.
+        (several live windows on the same cwd) are never folded. The
+        same family notion drives the adoption-time heal in
+        handlers/topics/family_rebind.py, which refuses ambiguity among
+        the DEAD candidates instead; the two directions are deliberate.
         """
         try:
             raw = json.loads(config.session_map_file.read_text())

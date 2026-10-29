@@ -1195,7 +1195,7 @@ class TestAdoptUnboundWindowsNeedsAConfirmedListing:
         mock_sm.audit_state.assert_not_called()
 
 
-class TestStillAdoptable:
+class TestConfirmedAdoptionListing:
     """The point-of-use check behind every automatic adoption."""
 
     @staticmethod
@@ -1208,13 +1208,15 @@ class TestStillAdoptable:
         )
 
     async def _verdict(self, windows) -> bool:
-        from ccgram.handlers.topics.topic_orchestration import still_adoptable
+        from ccgram.handlers.topics.topic_orchestration import (
+            confirmed_adoption_listing,
+        )
 
         with patch(
             "ccgram.handlers.topics.topic_orchestration.tmux_manager"
         ) as mock_tmux:
             mock_tmux.list_windows_for_reconciliation = AsyncMock(return_value=windows)
-            return await still_adoptable("@5")
+            return await confirmed_adoption_listing("@5") is not None
 
     async def test_eligible_window_passes(self):
         assert await self._verdict([self._ref("@5", eligible=True)]) is True
@@ -1238,7 +1240,9 @@ class TestAdoptionIdentityFoldsCase:
     """
 
     async def test_a_case_variant_id_is_still_adoptable(self) -> None:
-        from ccgram.handlers.topics.topic_orchestration import still_adoptable
+        from ccgram.handlers.topics.topic_orchestration import (
+            confirmed_adoption_listing,
+        )
 
         live = WindowRef(
             window_id="9F1C2D3E-4A5B", window_name="proj", cwd="/p", topic_eligible=True
@@ -1247,11 +1251,13 @@ class TestAdoptionIdentityFoldsCase:
             "ccgram.handlers.topics.topic_orchestration.tmux_manager"
         ) as mock_tmux:
             mock_tmux.list_windows_for_reconciliation = AsyncMock(return_value=[live])
-            assert await still_adoptable("9f1c2d3e-4a5b") is True
+            assert await confirmed_adoption_listing("9f1c2d3e-4a5b") is not None
 
     async def test_an_ineligible_case_variant_is_still_refused(self) -> None:
         """Folding case must not soften the eligibility half of the check."""
-        from ccgram.handlers.topics.topic_orchestration import still_adoptable
+        from ccgram.handlers.topics.topic_orchestration import (
+            confirmed_adoption_listing,
+        )
 
         live = WindowRef(
             window_id="9F1C2D3E-4A5B",
@@ -1263,4 +1269,4 @@ class TestAdoptionIdentityFoldsCase:
             "ccgram.handlers.topics.topic_orchestration.tmux_manager"
         ) as mock_tmux:
             mock_tmux.list_windows_for_reconciliation = AsyncMock(return_value=[live])
-            assert await still_adoptable("9f1c2d3e-4a5b") is False
+            assert await confirmed_adoption_listing("9f1c2d3e-4a5b") is None

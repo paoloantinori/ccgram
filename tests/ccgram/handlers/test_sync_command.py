@@ -45,8 +45,8 @@ def _patch_deps():
         patch(
             "ccgram.handlers.sync_command.list_windows_for_reconciliation"
         ) as mock_listing,
-        # still_adoptable lives in topic_orchestration and reads its own
-        # backend reference, so the same listing has to answer there.
+        # confirmed_adoption_listing lives in topic_orchestration and reads
+        # its own backend reference, so the same listing has to answer there.
         patch(
             "ccgram.handlers.topics.topic_orchestration.tmux_manager"
         ) as mock_tm_topics,

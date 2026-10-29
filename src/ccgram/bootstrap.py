@@ -40,8 +40,8 @@ from .handlers.topics.topic_orchestration import (
     adopt_unbound_windows as _adopt_unbound_windows,
 )
 from .handlers.topics.topic_orchestration import (
+    confirmed_adoption_listing as _confirmed_adoption_listing,
     handle_new_window as _handle_new_window,
-    still_adoptable as _still_adoptable,
 )
 from .handlers.topics.topic_orchestration import (
     is_pending_creation as _is_pending_creation,
@@ -300,10 +300,13 @@ async def start_session_monitor(
         # The automatic sink, so eligibility is re-read per window. The monitor
         # emits a batch and awaits each creation in turn, so without this the
         # last window in a batch is judged on a listing taken before the first
-        # one's topic existed. Explicit binds do not come through here.
-        if not await _still_adoptable(event.window_id):
+        # one's topic existed. Explicit binds do not come through here. The
+        # listing is handed to the adoption itself so the family-rebind check
+        # judges dead bindings against the same liveness truth.
+        listing = await _confirmed_adoption_listing(event.window_id)
+        if listing is None:
             return
-        await _handle_new_window(event, client)
+        await _handle_new_window(event, client, live_windows=listing)
 
     monitor.set_new_window_callback(new_window_callback)
 

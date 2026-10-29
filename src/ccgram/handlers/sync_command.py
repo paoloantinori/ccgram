@@ -428,7 +428,7 @@ async def _adopt_orphaned_windows(
     from .topics.topic_orchestration import handle_new_window as _handle_new_window
 
     # Lazy: same bidirectional cycle as handle_new_window above.
-    from .topics.topic_orchestration import still_adoptable as _still_adoptable
+    from .topics.topic_orchestration import confirmed_adoption_listing
 
     for issue in issues:
         if issue.category != "orphaned_window":
@@ -437,7 +437,8 @@ async def _adopt_orphaned_windows(
         if not match:
             continue
         window_id = match.group(1)
-        if not await _still_adoptable(window_id):
+        listing = await confirmed_adoption_listing(window_id)
+        if listing is None:
             continue
         view = window_query.view_window(window_id)
         name = (view.window_name if view else "") or thread_router.get_display_name(
@@ -450,7 +451,7 @@ async def _adopt_orphaned_windows(
             cwd=view.cwd if view else "",
         )
         try:
-            await _handle_new_window(event, client)
+            await _handle_new_window(event, client, live_windows=listing)
         except TelegramError, OSError:
             logger.exception("Failed to adopt orphaned window %s", window_id)
 

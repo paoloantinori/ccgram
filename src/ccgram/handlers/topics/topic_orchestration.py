@@ -12,7 +12,7 @@ Core responsibilities:
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 from contextlib import asynccontextmanager, contextmanager
 from dataclasses import dataclass
 import time
@@ -33,7 +33,8 @@ from ...session_monitor import NewWindowEvent
 from ...telegram_client import TelegramClient
 from ...thread_router import TopicProvisioning, thread_router
 from ...multiplexer import multiplexer as tmux_manager
-from ...multiplexer.base import canonical_window_id
+from ...multiplexer.base import WindowRef, canonical_window_id
+from .family_rebind import maybe_rebind_family_topic
 
 logger = structlog.get_logger()
 
@@ -354,9 +355,17 @@ def _find_topic_owner(
 
 
 def _bind_topic_to_user(
-    user_id: int, thread_id: int, window_id: str, chat_id: int, topic_name: str
+    user_id: int,
+    thread_id: int,
+    window_id: str,
+    chat_id: int | None,
+    topic_name: str,
 ) -> None:
-    """Bind a newly created topic to its preselected user."""
+    """Bind a topic to its owner, chat-scoped when the chat is known.
+
+    The family rebind reuses this write so any future companion write
+    (provisioning claims, alias registration) lands on both bind paths.
+    """
     thread_router.bind_thread(
         user_id,
         thread_id,
@@ -364,7 +373,13 @@ def _bind_topic_to_user(
         window_name=topic_name,
         chat_id=chat_id,
     )
-    thread_router.set_group_chat_id(user_id, thread_id, chat_id)
+    if chat_id is not None:
+        thread_router.set_group_chat_id(user_id, thread_id, chat_id)
+
+
+def _default_topic_name(event: NewWindowEvent) -> str:
+    """The topic name a window earns when nothing else has claimed one."""
+    return event.window_name or Path(event.cwd).name or event.window_id
 
 
 def _flush_provisioning_state() -> None:
@@ -898,6 +913,7 @@ async def handle_new_window(
     *,
     target_user_id: int | None = None,
     target_chat_id: int | None = None,
+    live_windows: Sequence[WindowRef] | None = None,
 ) -> bool:
     """Ensure a new window has a topic, returning whether it is bound."""
     async with _window_topic_lock(canonical_window_id(event.window_id)):
@@ -906,6 +922,7 @@ async def handle_new_window(
             client,
             target_user_id=target_user_id,
             target_chat_id=target_chat_id,
+            live_windows=live_windows,
         )
 
 
@@ -915,6 +932,7 @@ async def _handle_new_window_locked(
     *,
     target_user_id: int | None = None,
     target_chat_id: int | None = None,
+    live_windows: Sequence[WindowRef] | None = None,
 ) -> bool:
     """Create or bind a topic while holding the per-window creation lock."""
     if target_user_id is None and _is_window_already_bound(event.window_id):
@@ -933,7 +951,17 @@ async def _handle_new_window_locked(
 
     await _auto_detect_provider(event.window_id)
 
-    topic_name = event.window_name or Path(event.cwd).name or event.window_id
+    topic_name = _default_topic_name(event)
+
+    # Automatic adoption only: a targeted caller explicitly wants a new
+    # topic in a chosen chat and must not have it stolen.
+    if (
+        target_user_id is None
+        and target_chat_id is None
+        and await maybe_rebind_family_topic(event, client, live_windows=live_windows)
+    ):
+        return True
+
     seen_chats = (
         {target_chat_id}
         if target_chat_id is not None
@@ -958,8 +986,8 @@ async def _handle_new_window_locked(
     return any(results)
 
 
-async def still_adoptable(window_id: str) -> bool:
-    """Confirm, right now, that discovery may adopt this window.
+async def confirmed_adoption_listing(window_id: str) -> list[WindowRef] | None:
+    """The confirmed listing to adopt ``window_id`` against, or None.
 
     Read immediately before each automatic adoption, never once for a batch:
     creating a topic is several Telegram round-trips, so the second window in
@@ -970,9 +998,11 @@ async def still_adoptable(window_id: str) -> bool:
     Automatic adoption only. A picker selection is an explicit bind and may
     name a window discovery would not have taken on its own.
 
-    An unconfirmed listing answers False: skipping costs a retry on the next
+    An unconfirmed listing answers None: skipping costs a retry on the next
     cycle, while adopting a window that has gone creates a topic nothing will
-    ever drive.
+    ever drive. The caller reuses the returned listing for the adoption
+    itself (family matching reads the same liveness truth), so eligibility
+    and the adoption decision cannot diverge over a second fetch.
     """
     # Lazy: importing the reconciliation seam at module load forms a cycle.
     from ...multiplexer.reconciliation import list_windows_for_reconciliation
@@ -982,13 +1012,13 @@ async def still_adoptable(window_id: str) -> bool:
         logger.warning(
             "Skipping adoption: no confirmed window listing", window_id=window_id
         )
-        return False
+        return None
     if not any(w.matches(window_id) and w.topic_eligible for w in windows):
         logger.info(
             "Skipping adoption: window no longer adoptable", window_id=window_id
         )
-        return False
-    return True
+        return None
+    return windows
 
 
 async def adopt_unbound_windows(client: TelegramClient) -> None:
