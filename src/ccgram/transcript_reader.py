@@ -19,6 +19,7 @@ from dataclasses import dataclass
 import hashlib
 import json
 from pathlib import Path
+import time
 from typing import TYPE_CHECKING, Any, Callable, NamedTuple
 
 import aiofiles
@@ -95,11 +96,24 @@ _MARKER_BYTES = 128
 
 # Full-prefix verification is O(file) while appends are the common case, so
 # marker-verified append cycles defer it on an exponential backoff (capped).
-# A missed in-place rewrite is only caught at the next verification; the
-# parse position never rewinds, so no replay can occur, and the cost is a
-# delayed clamp plus whatever appends land in the clamp cycle itself.
+# A rewrite of already-verified bytes is caught at the next verification of
+# that range; the parse position never rewinds, so no replay can occur, and
+# the cost is a delayed clamp plus whatever appends land in the clamp cycle
+# itself. One region has no prior digest to compare against: bytes appended
+# since the last verification but outside the tail-marker window are hashed
+# for the first time at the next verification, so a rewrite there is simply
+# absorbed.
+# The backoff only counts growth cycles, so a session that goes quiet after
+# a marker-preserving rewrite would never reach the cap: once the session
+# goes quiet, the idle deadline forces one full verification. A session
+# that keeps appending stays under the growth defer until the overdue cap.
 _PREFIX_VERIFY_CAP = 32
-_PREFIX_VERIFY_FRESH = (0, 1)
+# (0, 1, 0.0) is the read-only default for sessions the schedule has not
+# seen yet: cycles 0 under threshold 1 are due by count, so the stamp is
+# never consulted there, and every writer (clean verification, reset, seed)
+# stores a real monotonic stamp.
+_PREFIX_VERIFY_FRESH = (0, 1, 0.0)
+_PREFIX_VERIFY_MAX_IDLE_S = 900.0
 
 
 def _transcript_output_text(value: Any) -> str:
@@ -387,7 +401,9 @@ class TranscriptReader:
         self._file_generations = self._snapshot_file_generations()
         self._file_markers = self._snapshot_file_markers()
         self._startup_file_boundaries = self._snapshot_startup_boundaries()
-        self._prefix_verify: dict[str, tuple[int, int]] = {}
+        # (cycles, threshold, last-verified monotonic): one value so pop and
+        # adoption migrate atomically instead of drifting across two dicts.
+        self._prefix_verify: dict[str, tuple[int, int, float]] = {}
 
     def _snapshot_file_ctimes(self) -> dict[str, int]:
         ctimes: dict[str, int] = {}
@@ -525,21 +541,31 @@ class TranscriptReader:
 
     def _prefix_verify_due(self, session_id: str) -> bool:
         state = self._prefix_verify.get(session_id)
-        return state is None or state[0] >= state[1]
+        if state is None or state[0] >= state[1]:
+            return True
+        # Growth-cycle backoff never counts quiet polls, so a session that
+        # stops appending right after a marker-preserving rewrite would sit
+        # under the threshold forever; the idle deadline bounds the deferral.
+        return time.monotonic() - state[2] > _PREFIX_VERIFY_MAX_IDLE_S
 
     def _prefix_verify_overdue(self, session_id: str) -> bool:
         state = self._prefix_verify.get(session_id)
         return state is not None and state[0] >= _PREFIX_VERIFY_CAP
 
     def _note_append_cycle(self, session_id: str) -> None:
-        cycles, threshold = self._prefix_verify.get(session_id, _PREFIX_VERIFY_FRESH)
+        cycles, threshold, verified_at = self._prefix_verify.get(
+            session_id, _PREFIX_VERIFY_FRESH
+        )
         self._prefix_verify[session_id] = (
             min(cycles + 1, _PREFIX_VERIFY_CAP),
             threshold,
+            verified_at,
         )
 
     def _reset_prefix_verify(self, session_id: str) -> None:
-        self._prefix_verify[session_id] = _PREFIX_VERIFY_FRESH
+        # A real monotonic stamp, not the 0.0 sentinel: the post-clamp idle
+        # deadline must already be running (see _PREFIX_VERIFY_FRESH).
+        self._prefix_verify[session_id] = (0, 1, time.monotonic())
 
     async def _record_clean_verification(
         self, session_id: str, file_path: Path, st: Any
@@ -549,13 +575,20 @@ class TranscriptReader:
         cycles that return at the mtime gate still advance the schedule."""
         size, digest = self._file_prefixes.get(session_id, (0, b""))
         if size != st.st_size:
-            digest = await asyncio.to_thread(_prefix_digest, file_path, st.st_size)
+            # A transient read error leaves the schedule untouched, so the
+            # verification stays due and retries next cycle.
+            try:
+                digest = await asyncio.to_thread(_prefix_digest, file_path, st.st_size)
+            except OSError:
+                logger.debug("Baseline extension digest failed for %s", session_id)
+                return
             size = st.st_size
         self._file_prefixes[session_id] = (size, digest)
         threshold = self._prefix_verify.get(session_id, _PREFIX_VERIFY_FRESH)[1]
         self._prefix_verify[session_id] = (
             0,
             min(threshold * 2, _PREFIX_VERIFY_CAP),
+            time.monotonic(),
         )
 
     async def _prepare_observed_generation(
@@ -618,10 +651,25 @@ class TranscriptReader:
         if changed and check_marker:
             if prefix_checked and prefix_changed:
                 consumed_intact = False
-            elif marker_changed is False and st.st_size >= pos:
+            elif (
+                marker_changed is False
+                and st.st_size >= pos
+                and (
+                    not generation_signal
+                    or (
+                        prefix_checked
+                        and self._prefix_covers_consumed(session_id, pos, st)
+                    )
+                )
+            ):
                 # No digest verdict contradicts the signal (none ran, or the
                 # checked prefix matched while no longer covering consumed):
-                # an intact tail marker rules out a consuming rewrite.
+                # an intact tail marker rules out a consuming rewrite. An
+                # inode change is stronger evidence than same-file ctime
+                # churn: an atomic replacement can preserve the old prefix
+                # and the marker window while changing bytes between them,
+                # so dismissing a NEW generation demands proof covering all
+                # consumed bytes, not the last 128 alone.
                 consumed_intact = True
             else:
                 consumed_intact = prefix_checked and self._prefix_covers_consumed(
@@ -641,11 +689,17 @@ class TranscriptReader:
                 self._startup_file_boundaries.pop(session_id, None)
                 # Re-baseline at the clamp point. The old content is gone; a
                 # stale baseline would make every later due verification
-                # mismatch and clamp away one append cycle each time.
-                self._file_prefixes[session_id] = (
-                    st.st_size,
-                    await asyncio.to_thread(_prefix_digest, file_path, st.st_size),
-                )
+                # mismatch and clamp away one append cycle each time. A
+                # transient read error keeps the stale baseline rather than
+                # unwinding the clamp: the covers check then stays false and
+                # the next cycle clamps again until the digest succeeds.
+                try:
+                    self._file_prefixes[session_id] = (
+                        st.st_size,
+                        await asyncio.to_thread(_prefix_digest, file_path, st.st_size),
+                    )
+                except OSError:
+                    logger.debug("Clamp re-baseline digest failed for %s", session_id)
         resolved = changed and not consumed_intact
         if prefix_checked and not prefix_changed and not resolved:
             await self._record_clean_verification(session_id, file_path, st)
@@ -663,6 +717,7 @@ class TranscriptReader:
         window_id: str,
         *,
         check_marker: bool,
+        clamped: bool = False,
     ) -> _StableRead | None:
         """Read a stable file generation, retrying once after a write race."""
         reset_generation = False
@@ -681,6 +736,7 @@ class TranscriptReader:
             rewritten_in_place = before.st_ctime_ns != after.st_ctime_ns
             marker_changed = False
             marker_checked = False
+            marker_matched = False
             saved = self._file_markers.get(session_id) if check_marker else None
             # saved[0] may sit before start_offset when a same-cycle clamp in
             # the generation probe already advanced the parse position. The
@@ -688,7 +744,10 @@ class TranscriptReader:
             # survived, so it can qualify the read as a verified append, but
             # only a comparison at the current offset is replacement evidence:
             # treating a stale mismatch as changed would leave the marker
-            # cache forever unmatched and clamp every later append away.
+            # cache forever unmatched and clamp every later append away. A
+            # MISMATCH at the stale offset still happened during an in-place
+            # rewrite, so it must not qualify the read as an append; only a
+            # marker that still matches may.
             if saved is not None and saved[0] <= start_offset:
                 try:
                     marker = await asyncio.to_thread(_tail_marker, file_path, saved[0])
@@ -696,12 +755,17 @@ class TranscriptReader:
                     return None
                 marker_changed = saved[0] == start_offset and marker != saved[1]
                 marker_checked = True
+                marker_matched = marker == saved[1]
             if (
                 same_generation
                 and not marker_changed
                 and (
                     not rewritten_in_place
-                    or (marker_checked and after.st_size >= before.st_size)
+                    or (
+                        marker_checked
+                        and marker_matched
+                        and after.st_size >= before.st_size
+                    )
                 )
             ):
                 # Verified append: either nothing changed during the read, or
@@ -719,7 +783,14 @@ class TranscriptReader:
             if consumed_survived:
                 # Concurrent append or metadata churn, not a replacement: the
                 # bytes already delivered survived, so keep this read.
-                await self._record_clean_verification(session_id, file_path, after)
+                if clamped:
+                    # The probe already clamped this cycle on replacement
+                    # evidence. Keeping the read is safe, but it is not a
+                    # clean verification: the reset to the shortest interval
+                    # must survive the cycle instead of being doubled away.
+                    self._reset_prefix_verify(session_id)
+                else:
+                    await self._record_clean_verification(session_id, file_path, after)
                 return _StableRead(entries, after, reset_generation)
             tracked.parsed_offset = after.st_size
             self._startup_file_boundaries.pop(session_id, None)
@@ -738,10 +809,9 @@ class TranscriptReader:
     ) -> bool:
         """Commit caches only after a stable read and marker capture."""
         stable_stat = stable_read.stat
+        pos = self._parse_pos(tracked)
         try:
-            marker = await asyncio.to_thread(
-                _tail_marker, file_path, self._parse_pos(tracked)
-            )
+            marker = await asyncio.to_thread(_tail_marker, file_path, pos)
         except OSError:
             return False
         self._file_mtimes[session_id] = stable_stat.st_mtime
@@ -753,11 +823,37 @@ class TranscriptReader:
         self._file_sizes[session_id] = stable_stat.st_size
         if refresh_prefix:
             # A clamp moved the parse position: re-baseline at the new EOF.
-            self._file_prefixes[session_id] = (
-                stable_stat.st_size,
-                await asyncio.to_thread(_prefix_digest, file_path, stable_stat.st_size),
-            )
-        self._file_markers[session_id] = (self._parse_pos(tracked), marker)
+            # A transient read error keeps the stale baseline, which blocks
+            # dismissals until the next clamp retries.
+            try:
+                self._file_prefixes[session_id] = (
+                    stable_stat.st_size,
+                    await asyncio.to_thread(
+                        _prefix_digest, file_path, stable_stat.st_size
+                    ),
+                )
+            except OSError:
+                logger.debug("Commit re-baseline digest failed for %s", session_id)
+        elif self._file_prefixes.get(session_id) is None:
+            # A failed startup snapshot leaves no baseline, and without one
+            # the scheduled digest never starts (it needs a range to
+            # compare), so rewrite detection would never recover. Seed the
+            # baseline at the parse position once, on the first successful
+            # read; a transient read error retries on the next commit.
+            try:
+                self._file_prefixes[session_id] = (
+                    pos,
+                    await asyncio.to_thread(_prefix_digest, file_path, pos),
+                )
+                # The seed is itself a verification of [0, pos): record it,
+                # or the next quiet poll re-hashes the exact same range.
+                self._reset_prefix_verify(session_id)
+            except OSError:
+                logger.debug("Baseline seeding digest failed for %s", session_id)
+                # The mtime was already stored above; drop it so a quiet
+                # file still reaches the next commit and the seed retries.
+                self._file_mtimes.pop(session_id, None)
+        self._file_markers[session_id] = (pos, marker)
         return True
 
     async def _rebuild_committed_parser_context(
@@ -1029,6 +1125,68 @@ class TranscriptReader:
         self._file_mtimes.pop(tracked.session_id, None)
         return False
 
+    def _rollback_probe_observation(
+        self,
+        tracked: TrackedSession,
+        probe_offset: int,
+        probe_boundary: _StartupBoundary | None,
+        probe_prefix: tuple[int, bytes] | None,
+        probe_verify: tuple[int, int, float] | None,
+    ) -> None:
+        """Undo the probe's speculative writes when identity flipped.
+
+        A clamp inside the probe re-baselines the prefix at the new file
+        and re-arms the verify schedule. The observation flip discarded
+        this cycle's verdict, so keeping that baseline would bless a
+        replacement nobody committed to: every cached judgement goes back
+        to what the probe saw and the next cycle re-judges the file.
+
+        The restore set must cover every write _prepare_observed_generation
+        can make: the parse offset, the startup boundary, the prefix
+        baseline, and the verify schedule. A new probe write needs a
+        matching restore here or it survives flips by omission.
+        """
+        tracked.parsed_offset = probe_offset
+        session_id = tracked.session_id
+        if probe_boundary is None:
+            self._startup_file_boundaries.pop(session_id, None)
+        else:
+            self._startup_file_boundaries[session_id] = probe_boundary
+        if probe_prefix is None:
+            self._file_prefixes.pop(session_id, None)
+        else:
+            self._file_prefixes[session_id] = probe_prefix
+        if probe_verify is None:
+            self._prefix_verify.pop(session_id, None)
+        else:
+            self._prefix_verify[session_id] = probe_verify
+
+    def _poll_already_seen(
+        self,
+        tracked: TrackedSession,
+        *,
+        supports_incremental_read: bool,
+        generation_changed: bool,
+        rebuild_parser: bool,
+        current_mtime: float,
+        current_size: int,
+    ) -> bool:
+        """True when nothing this poll depends on changed since the last one.
+
+        A generation change, a pending parser rebuild, or an mtime bump all
+        force the read; otherwise incremental readers also need the size to
+        have passed the parse position, while whole-document readers re-parse
+        on any mtime change alone.
+        """
+        if generation_changed or rebuild_parser:
+            return False
+        last_mtime = self._file_mtimes.get(tracked.session_id, 0.0)
+        if current_mtime > last_mtime:
+            return False
+        if supports_incremental_read:
+            return current_size <= self._parse_pos(tracked)
+        return True
+
     async def _process_session_file(
         self,
         session_id: str,
@@ -1066,6 +1224,8 @@ class TranscriptReader:
 
         probe_offset = tracked.parsed_offset
         probe_boundary = self._startup_file_boundaries.get(session_id)
+        probe_prefix = self._file_prefixes.get(session_id)
+        probe_verify = self._prefix_verify.get(session_id)
         (
             generation_changed,
             consumed_intact,
@@ -1077,9 +1237,9 @@ class TranscriptReader:
             check_marker=provider.capabilities.supports_incremental_read,
         )
         if not identity_state.accepts_provider_observation(window_id, provider_name):
-            tracked.parsed_offset = probe_offset
-            if probe_boundary is not None:
-                self._startup_file_boundaries[session_id] = probe_boundary
+            self._rollback_probe_observation(
+                tracked, probe_offset, probe_boundary, probe_prefix, probe_verify
+            )
             return
         if (
             not generation_changed
@@ -1091,19 +1251,13 @@ class TranscriptReader:
             self._parser_rebuild_pending.add(session_id)
         previous_parsed_offset = tracked.parsed_offset
         rebuild_parser = session_id in self._parser_rebuild_pending
-        last_mtime = self._file_mtimes.get(session_id, 0.0)
-        if provider.capabilities.supports_incremental_read:
-            if (
-                not generation_changed
-                and not rebuild_parser
-                and current_mtime <= last_mtime
-                and current_size <= self._parse_pos(tracked)
-            ):
-                return
-        elif (
-            not generation_changed
-            and not rebuild_parser
-            and current_mtime <= last_mtime
+        if self._poll_already_seen(
+            tracked,
+            supports_incremental_read=provider.capabilities.supports_incremental_read,
+            generation_changed=generation_changed,
+            rebuild_parser=rebuild_parser,
+            current_mtime=current_mtime,
+            current_size=current_size,
         ):
             return
 
@@ -1123,6 +1277,7 @@ class TranscriptReader:
             file_path,
             window_id,
             check_marker=provider.capabilities.supports_incremental_read,
+            clamped=generation_changed,
         )
         if (
             not self._admit_read(
@@ -1164,7 +1319,14 @@ class TranscriptReader:
                 supports_incremental_read=provider.capabilities.supports_incremental_read,
             )
             if not rebuilt:
-                tracked.parsed_offset = tracked.last_byte_offset
+                # Roll back to the watermark to re-read the suffix with a
+                # fresh parser, but never below this cycle's start position:
+                # below it lies content the clamp already declared history
+                # or earlier cycles already delivered, and re-reading that
+                # range replays it.
+                tracked.parsed_offset = max(
+                    previous_parsed_offset, tracked.last_byte_offset
+                )
                 self._file_mtimes.pop(session_id, None)
                 new_entries = []
             elif not self._admit_read(
