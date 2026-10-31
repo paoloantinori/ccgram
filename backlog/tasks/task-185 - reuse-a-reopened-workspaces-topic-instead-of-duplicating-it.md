@@ -56,3 +56,9 @@ reviewers (8 findings applied after dedup, 3 declined with reasons),
 /code-review high effort (8 findings: 5 applied, 3 declined with
 reasons). Side finding filed: pre-existing test-isolation leak
 test_new_window_sync -> sync audit (TASK-186).
+
+2026-10-31 append: the rebind also refuses when a live same-family sibling
+((cwd, provider) pair, state-then-map facts, casefolded provider) already
+serves the family; a live window of a different provider on the same cwd is
+not family and must not block the reuse (skeptic-refuted hole, closed with
+regression tests).

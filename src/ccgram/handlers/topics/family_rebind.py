@@ -13,7 +13,8 @@ and they must not be merged:
   reopened the same session. Adoption would then create a duplicate
   topic ("X", "X 2", "X 3") while the old topic stayed bound to the dead
   id forever. At adoption time, exactly one dead same-family binding
-  means the new window is that topic's agent back: rebind the topic,
+  means the new window is that topic's agent back UNLESS a live
+  same-family sibling already serves that family: rebind the topic,
   seed the monitor at EOF so the pre-rebind backlog is not replayed, and
   post one direct notice.
 
@@ -85,6 +86,13 @@ class FamilyBinding:
     provider: str = ""
 
 
+def _same_family_provider(stored: str, new: str) -> bool:
+    """Case-folded provider equality: state rows and session_map entries
+    can disagree on casing, and a case-only difference must not split a
+    family or lift a sibling block."""
+    return stored.casefold() == new.casefold()
+
+
 def find_family_match(
     new_cwd: str, new_provider: str, bindings: Sequence[FamilyBinding]
 ) -> FamilyBinding | None:
@@ -108,7 +116,7 @@ def find_family_match(
         if (
             binding.cwd == new_cwd
             and binding.provider
-            and binding.provider.casefold() == new_provider.casefold()
+            and _same_family_provider(binding.provider, new_provider)
         ):
             family.append(binding)
     return family[0] if len(family) == 1 else None
@@ -171,8 +179,8 @@ async def _family_decision(
 
     Every refusal is a fail-closed pass back to today's behavior: a
     window the listing does not show as live and topic-eligible, no dead
-    binding at all, an unreadable session map, or a family that is empty
-    or ambiguous.
+    binding at all, an unreadable session map, a family that is empty or
+    ambiguous, or a live same-family sibling already serving it.
     """
     new_ref = next((w for w in windows if w.matches(event.window_id)), None)
     if new_ref is None or not new_ref.topic_eligible:
@@ -212,9 +220,8 @@ async def _family_decision(
     if match is None:
         return None
     # The family already served by a live topic? A live same-cwd window
-    # means another topic owns that workspace right now: rebinding the
-    # dead one would leave two same-family topics, the duplicate shape
-    # this heal exists to prevent. Fall through to a new topic. The
+    # means a same-family topic may own that workspace: the provider
+    # check below decides. Fall through to a new topic. The
     # sibling check keys on the BOUND window's stored family facts, not
     # the listing cwd: a backend can emit an empty cwd for a live record
     # (herdr does when the agent.list record lacks one), and a listing
@@ -225,7 +232,19 @@ async def _family_decision(
         if w_key == new_key or not thread_router.has_window(w_key):
             continue
         sibling_cwd = identity_state.get_cwd(w_key)
-        if sibling_cwd == (new_ref.cwd or event.cwd):
+        if sibling_cwd != (new_ref.cwd or event.cwd):
+            continue
+        # A live window of a different provider on the same directory is a
+        # different family and must not block the reopen. Sibling facts
+        # come from the window state only: a live bound window's map entry
+        # can carry a previous run's provider (session_map sync corrects
+        # map claims for exactly that reason), so trusting it here would
+        # block on a stale family. An unknown state provider keeps the
+        # block, the conservative direction.
+        sibling_provider = identity_state.get_provider_name(w_key)
+        if not sibling_provider or _same_family_provider(
+            sibling_provider, new_provider
+        ):
             return None
     return new_entry, new_provider, match
 

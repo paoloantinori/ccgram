@@ -68,10 +68,9 @@ class TestFindFamilyMatch:
             cwd=_CWD,
             provider="claude",
         )
-        assert (
-            find_family_match(_CWD, "claude", [_binding("@old-a"), twin]).old_window_id
-            == "@old-a"
-        )
+        match = find_family_match(_CWD, "claude", [_binding("@old-a"), twin])
+        assert match is not None
+        assert match.old_window_id == "@old-a"
 
     def test_provider_mismatch_matches_none(self) -> None:
         assert find_family_match(_CWD, "claude", [_binding(provider="codex")]) is None
@@ -394,11 +393,53 @@ class TestLiveSiblingGuard:
         harness.bind("@dead")
         harness.bind("@live", thread_id=77)
         harness.cwds.update({"@live": _CWD, "@dead": _CWD})
-        harness.providers.update({"@live": "claude", "@dead": "claude"})
+        harness.providers.update({"@live": "claude", "@dead": "claude", _NEW: "claude"})
         bot = _create_bot()
 
         adopted = await handle_new_window(
             _event(), bot, live_windows=[_ref("@live", cwd=""), _ref(_NEW)]
+        )
+
+        assert adopted is True
+        bot.create_forum_topic.assert_called_once()
+
+    async def test_live_sibling_other_provider_rebinds(self, harness) -> None:
+        """A live same-cwd window of a different provider is not family.
+
+        A live codex topic on the same directory must not block reopening
+        the dead claude topic, or the reopen duplicates the family.
+        """
+        harness.bind("@dead")
+        harness.bind("@live", thread_id=77)
+        harness.cwds.update({"@live": _CWD, "@dead": _CWD})
+        harness.providers.update({"@live": "codex", "@dead": "claude"})
+        transcript = harness.transcript("s-new")
+        harness.entry(_NEW, "s-new", str(transcript))
+        client = FakeTelegramClient()
+
+        adopted = await handle_new_window(
+            _event(), client, live_windows=[_ref("@live"), _ref(_NEW)]
+        )
+
+        assert adopted is True
+        assert client.call_count("create_forum_topic") == 0
+        assert client.call_count("send_message") == 1
+
+    async def test_live_sibling_unknown_provider_still_blocks(self, harness) -> None:
+        """A sibling whose provider is unknown keeps the conservative block.
+
+        A sibling whose window state carries no provider stays unknown;
+        letting it through could duplicate a same-family topic, so unknown
+        keeps the block, the conservative direction.
+        """
+        harness.bind("@dead")
+        harness.bind("@live", thread_id=77)
+        harness.cwds.update({"@live": _CWD, "@dead": _CWD})
+        harness.providers.update({"@dead": "claude", _NEW: "claude"})
+        bot = _create_bot()
+
+        adopted = await handle_new_window(
+            _event(), bot, live_windows=[_ref("@live"), _ref(_NEW)]
         )
 
         assert adopted is True
