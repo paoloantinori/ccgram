@@ -633,10 +633,23 @@ class SessionMapSync:
         """
         del session_map
         for key in old_format_keys:
-            logger.warning(
+            # The monitor re-reads and re-syncs the map every cycle
+            # (~1 s, change or not; the hook writes from another process),
+            # so an operatorless bridge with retained keys logs the full set
+            # every cycle (measured 5/sec on the Mac after a reboot). The
+            # periodic throttle sweep (600 s) evicts a suppressed entry, so
+            # the warning resurfaces roughly every ten minutes per key:
+            # enough to stay visible, quiet enough to read the log.
+            log_throttled(
+                logger,
+                f"retain-legacy-key:{key}",
                 "Retaining unrecognized session_map key for recovery; "
                 "wait for a unique live alias or explicitly rebind: %s",
                 key,
+                # Matches the periodic throttle sweep's eviction age:
+                # the entry lives exactly one suppression window.
+                cooldown=600.0,
+                level="warning",
             )
 
     async def wait_for_session_map_entry(
