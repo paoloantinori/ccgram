@@ -444,3 +444,110 @@ class TestLiveSiblingGuard:
 
         assert adopted is True
         bot.create_forum_topic.assert_called_once()
+
+
+class TestWorkspaceSuccession:
+    """The /clear-or-respawn rebind: same herdr workspace, new identity.
+
+    A respawn can mint a new agent session at a different cwd inside the
+    same workspace, so the (cwd, provider) family cannot see the
+    succession; the workspace label in the display names can (2026-11-04
+    Mac incident: /clear spawned a home-cwd session in workspace ha-tuya
+    and adoption minted a duplicate topic).
+    """
+
+    async def test_same_workspace_rebind_despite_cwd_change(self, harness) -> None:
+        # The dead binding's facts cannot match by family (cwd and provider
+        # both differ from the new window), but its display name carries
+        # the workspace label the new window's prefix repeats.
+        harness.bind("herdr-session-v1-0deaddead0")
+        harness.cwds["herdr-session-v1-0deaddead0"] = "/repo/old"
+        harness.providers["herdr-session-v1-0deaddead0"] = "claude"
+        harness.router.set_display_name("herdr-session-v1-0deaddead0", "ha-tuya")
+        harness.providers[_NEW] = "claude"
+        transcript = harness.transcript("s-new")
+        harness.entry(_NEW, "s-new", str(transcript))
+        client = FakeTelegramClient()
+        listing = [
+            WindowRef(
+                window_id=_NEW,
+                window_name="Claude ▸ ha-tuya ▸ ha-tuya ▸ p1",
+                cwd="/Users/pantinor",
+            ),
+            _ref("w-other", cwd="/elsewhere"),
+        ]
+        # The new window's listing name carries the prefixed workspace.
+        event = NewWindowEvent(
+            window_id=_NEW,
+            session_id="",
+            window_name="Claude ▸ ha-tuya ▸ ha-tuya ▸ p1",
+            cwd="/Users/pantinor",
+        )
+
+        assert await handle_new_window(event, client, live_windows=listing) is True
+
+        assert client.call_count("create_forum_topic") == 0
+        assert client.call_count("send_message") == 1
+        assert harness.router.chat_thread_bindings[(_USER, _CHAT, _THREAD)] == _NEW
+
+    async def test_two_dead_same_workspace_refuse(self, harness) -> None:
+        harness.bind("@dead-a")
+        harness.bind("@dead-b", thread_id=43)
+        for wid in ("@dead-a", "@dead-b"):
+            harness.cwds[wid] = "/repo/old"
+            harness.providers[wid] = "claude"
+            harness.router.set_display_name(wid, "ha-tuya")
+        harness.providers[_NEW] = "claude"
+        bot = _create_bot()
+        listing = [
+            WindowRef(
+                window_id=_NEW,
+                window_name="Claude ▸ ha-tuya ▸ ha-tuya ▸ p1",
+                cwd="/Users/pantinor",
+            ),
+            _ref("w-other"),
+        ]
+        event = NewWindowEvent(
+            window_id=_NEW,
+            session_id="",
+            window_name="Claude ▸ ha-tuya ▸ ha-tuya ▸ p1",
+            cwd="/Users/pantinor",
+        )
+
+        assert await handle_new_window(event, bot, live_windows=listing) is True
+
+        bot.create_forum_topic.assert_called_once()
+
+    async def test_unattributable_dead_binding_does_not_success(self, harness) -> None:
+        """A dead binding with no stored provider proves no succession.
+
+        Provider parity with the family rule (code review 2026-11-04):
+        succession matching on workspace alone must not claim a binding
+        nobody can attribute, even when the cwd matches the new window
+        exactly.
+        """
+        harness.bind("herdr-session-v1-0deaddead0")
+        harness.cwds["herdr-session-v1-0deaddead0"] = "/Users/pantinor"
+        # Deliberately no providers["herdr-session-v1-0deaddead0"]: the dead binding is
+        # unattributable.
+        harness.router.set_display_name("herdr-session-v1-0deaddead0", "ha-tuya")
+        harness.providers[_NEW] = "claude"
+        bot = _create_bot()
+        listing = [
+            WindowRef(
+                window_id=_NEW,
+                window_name="Claude ▸ ha-tuya ▸ ha-tuya ▸ p1",
+                cwd="/Users/pantinor",
+            ),
+            _ref("w-other"),
+        ]
+        event = NewWindowEvent(
+            window_id=_NEW,
+            session_id="",
+            window_name="Claude ▸ ha-tuya ▸ ha-tuya ▸ p1",
+            cwd="/Users/pantinor",
+        )
+
+        assert await handle_new_window(event, bot, live_windows=listing) is True
+
+        bot.create_forum_topic.assert_called_once()

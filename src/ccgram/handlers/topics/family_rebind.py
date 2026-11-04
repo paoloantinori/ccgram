@@ -44,6 +44,10 @@ from typing import Any
 import structlog
 
 from ...multiplexer.base import WindowRef, canonical_window_id
+from ...multiplexer.topic_mapping import (
+    TOPIC_PREFIX_SEPARATOR,
+    workspace_segment,
+)
 from ...session import session_manager
 from ...session_map import raw_session_map_entry, read_session_map_raw
 from ...session_monitor import NewWindowEvent, SessionMonitor, get_active_monitor
@@ -120,6 +124,47 @@ def find_family_match(
         ):
             family.append(binding)
     return family[0] if len(family) == 1 else None
+
+
+def find_succession_match(
+    new_workspace: str,
+    new_provider: str,
+    bindings: Sequence[FamilyBinding],
+    display_names: Mapping[str, str],
+) -> FamilyBinding | None:
+    """The one dead binding whose window lived in the same workspace.
+
+    A respawn or /clear can mint a new agent session at a different cwd
+    inside the same herdr workspace, so the (cwd, provider) family cannot
+    see the succession; the workspace label can. The same ambiguity rule
+    as the family applies: two dead bindings in one workspace answer None,
+    a new topic, rather than a guess. Like the family, a dead binding
+    whose provider is unknown is not a candidate: the provider is a
+    requirement here too, compared casefolded.
+    """
+    if not new_workspace or not new_provider:
+        return None
+    seen_windows: set[str] = set()
+    succession: list[FamilyBinding] = []
+    for binding in bindings:
+        if not binding.old_window_id.startswith("herdr-session-v1-"):
+            continue  # succession is a herdr-workspace notion, not tmux labels
+        if binding.old_window_id in seen_windows:
+            continue
+        seen_windows.add(binding.old_window_id)
+        stored = display_names.get(binding.old_window_id, "")
+        if not stored or stored == binding.old_window_id:
+            continue  # never stamped: the window id fallback is not a label
+        if workspace_segment(stored).casefold() != new_workspace.casefold():
+            continue
+        # Provider parity with the family rule: an unattributable dead
+        # binding proves no succession, exactly as it proves no family.
+        if not binding.provider or not _same_family_provider(
+            binding.provider, new_provider
+        ):
+            continue
+        succession.append(binding)
+    return succession[0] if len(succession) == 1 else None
 
 
 def _entry_str(entry: Mapping[str, object] | None, key: str) -> str:
@@ -217,6 +262,25 @@ async def _family_decision(
         for user_id, chat_id, thread_id, window_id in dead
     ]
     match = find_family_match(new_ref.cwd or event.cwd, new_provider, bindings)
+    new_name = new_ref.window_name or event.window_name
+    new_workspace = workspace_segment(new_name)
+    # Succession needs a herdr-stamped name: a bare display label could
+    # be any backend's title, and label equality across unrelated
+    # projects would steal topics.
+    if match is None and new_workspace and TOPIC_PREFIX_SEPARATOR in new_name:
+        # A respawn or /clear can re-incarnate a pane as a new session id
+        # at a different cwd inside the same herdr workspace; the family
+        # cannot see that succession, the workspace label can. The
+        # workspace is a weaker identity than the family pair, so the
+        # claim "this workspace's other window is gone" needs a listing
+        # that actually looked at other windows: a listing holding only
+        # the new window supports no statement about anyone else.
+        match = find_succession_match(
+            new_workspace,
+            new_provider,
+            bindings,
+            {wid: thread_router.get_display_name(wid) for _, _, _, wid in dead},
+        )
     if match is None:
         return None
     # The family already served by a live topic? A live same-cwd window

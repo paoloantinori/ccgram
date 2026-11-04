@@ -19,8 +19,30 @@ from __future__ import annotations
 
 from .base import MultiplexerCapabilities, WindowRef
 
-# Separates workspace, tab, and optional pane parts in a Herdr topic title.
+# Separates provider, workspace, tab, and optional pane parts in a Herdr
+# topic title.
 TOPIC_PREFIX_SEPARATOR = " ▸ "
+
+# Degraded stamped shapes drop the provider head: workspace plus tab or
+# pane still identifies the workspace at index 0.
+_MIN_WORKSPACE_HEAD_SEGMENTS = 2
+_STAMPED_SEGMENTS = 4  # provider, workspace, tab, pane
+
+
+def workspace_segment(display_name: str) -> str:
+    """The Herdr workspace segment of a stamped display name.
+
+    Stamped shapes carry the workspace at index 1 with a provider head
+    (four segments: provider, workspace, tab, pane) or degraded without
+    one (workspace plus tab or pane). The bare-label form older state
+    wrote answers itself; an empty name answers "".
+    """
+    parts = display_name.split(TOPIC_PREFIX_SEPARATOR)
+    if len(parts) >= _STAMPED_SEGMENTS:
+        return parts[1]
+    if len(parts) >= _MIN_WORKSPACE_HEAD_SEGMENTS:
+        return parts[0]
+    return display_name
 
 
 def format_agent_topic_prefix(
