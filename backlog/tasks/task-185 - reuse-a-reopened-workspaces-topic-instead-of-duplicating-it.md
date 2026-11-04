@@ -62,3 +62,14 @@ test_new_window_sync -> sync audit (TASK-186).
 serves the family; a live window of a different provider on the same cwd is
 not family and must not block the reuse (skeptic-refuted hole, closed with
 regression tests).
+
+2026-11-04 append: workspace-succession rebind (266b90e2). When the family
+declines, a dead herdr binding whose persisted display name carries the same
+workspace label as the new window's stamped name is still a reuse candidate:
+/clear and respawn re-key the agent session and can change the cwd, which the
+(cwd, provider) family cannot see. The label parser (workspace_segment) lives
+beside the producer in multiplexer/topic_mapping and handles the bare-label
+generation plus the degraded 2-3 segment stamped shapes. The deeper move
+(recorded from the altitude review): stamp workspace on WindowRef/WindowState
+at bind time so succession reads a stored fact instead of parsing a display
+string.
