@@ -21,7 +21,10 @@ logs a `no extensions loaded` warning since 2026-10-02).
 Manual form, if the script is unreachable:
 
 - bird: `cd ~/data/repo/apps/ccgram && uv tool install . --force --with ~/data/repo/apps/ccgram-ext && systemctl --user restart ccgram.service`
-- mac: `ssh mac` then same with `/opt/homebrew/bin/uv`, paths `~/data/repo/personal/ccgram{,-ext}`, restart via `launchctl kickstart -k gui/$(id -u)/com.user.ccgram`.
+- mac: `ssh mac` then same with `/opt/homebrew/bin/uv`, paths `~/data/repo/personal/ccgram{,-ext}`. The bridge runs under
+  `/Library/LaunchDaemons/com.user.ccgram` (the gui LaunchAgent is disabled): the deploy script's restart-verify targets the wrong
+  service, so after `--mac` restart manually with `kill $(pgrep -f "ccgram run")` (the daemon respawns it), then verify "extension
+  loaded" on `~/Library/Logs/ccgram.log`. Log timestamps are local time, not UTC.
 
 ## Topic naming contract
 

@@ -84,6 +84,7 @@ Backend-neutral terminal-multiplexer seam (mirrors the `providers/` seam). Calle
 - `status_cmd.py` — `ccgram status`.
 - `telegram_request.py` — resilient long-polling helpers (custom HTTPX transport).
 - `thread_router.py` — thread bindings, display names, reverse index, chat ID resolution. Constructed by `SessionManager`; module-level `thread_router` is a proxy. New polling paths read the delivery chat through `session_query.resolve_chat_id`; `test_handler_layering_invariants` prohibits adding direct singleton access to `window_tick/__init__.py`.
+- `transcript_reader.py`: renders tracked sessions into Telegram batches; replacement detection (family and workspace-succession rebind evidence), digest backoff, startup boundaries, delivery receipts and watermarks.
 - `toolbar_config.py` — per-provider button grids from TOML.
 - `topic_state_registry.py` — registry for per-topic/per-window cleanup functions with self-registration decorator and `register_bound()` for instance methods.
 - `user_preferences.py` — directory favorites + per-user read offsets. Constructed by `SessionManager`; module-level `user_preferences` is a proxy.
@@ -222,6 +223,8 @@ Top-level (constants, leaves, top-level commands):
 - `worktree.py` — pure git-worktree plumbing: `check_worktree_eligibility`, `suggest_branch_name`, `slug_for_path`, `worktree_path_for`, `validate_branch_name`, `create_worktree` (raises `WorktreeError`). No Telegram/tmux/state deps.
 - `window_callbacks.py` — bind, new, cancel.
 - `new_command.py` — `/new` and `/start`.
+- `family_rebind.py`: reuses a dead binding's topic for the reopening window; (cwd, provider) family match, then workspace-succession (same herdr workspace label after /clear or respawn re-keys the session); fails closed to a new topic.
+- `topic_provisioning_recovery.py`: resolves abandoned topic-provisioning claims from current evidence at bootstrap.
 
 `handlers/voice/` — voice transcription:
 

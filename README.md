@@ -173,6 +173,12 @@ Native Windows does not provide the Unix file locking, signal handling, and term
 
 ---
 
+## Fork notes (internal deployment)
+
+This fork is deployed on two workstation bridges via `cc-config/ccgram-bridge-deploy.sh` (installs with the in-tree `ccgram-ext` extension package). A plain `uv tool install .` silently drops the extension; use the deploy script, or add `--with <path-to-ccgram-ext>`.
+
+---
+
 ## Development
 
 ```bash
