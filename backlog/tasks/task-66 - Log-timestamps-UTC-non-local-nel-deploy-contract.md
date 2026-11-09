@@ -17,3 +17,5 @@ confrontano timestamp del log con `date` locale.
 
 DoD: docs fix + grep sugli script del repo che usano date/locale col
 log. Nessun codice.
+
+Status: DONE 2026-11-09. CLAUDE.md corrected (UTC, +1h CET invernale, +2h CEST); contesto: con 8f1e01c5 i timestamp del log sono anche datati (%Y-%m-%d), quindi il confronto col log e' ormai inequivocabile. Grep su scripts/ e ccgram-bridge-deploy.sh: nessuno confronta timestamp del log con `date` locale. Gate-exempt: docs-only.

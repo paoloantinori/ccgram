@@ -24,7 +24,8 @@ Manual form, if the script is unreachable:
 - mac: `ssh mac` then same with `/opt/homebrew/bin/uv`, paths `~/data/repo/personal/ccgram{,-ext}`. The bridge runs under
   `/Library/LaunchDaemons/com.user.ccgram` (the gui LaunchAgent is disabled): the deploy script's restart-verify targets the wrong
   service, so after `--mac` restart manually with `kill $(pgrep -f "ccgram run")` (the daemon respawns it), then verify "extension
-  loaded" on `~/Library/Logs/ccgram.log`. Log timestamps are local time, not UTC.
+  loaded" on `~/Library/Logs/ccgram.log`. Log timestamps are UTC and date-stamped since fork/main 8f1e01c5 (2026-11-09); +1h versus
+  winter CET, +2h summer CEST.
 
 ## Topic naming contract
 
