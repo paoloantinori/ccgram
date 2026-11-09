@@ -23,6 +23,12 @@ from .store import ProtocolStore
 logger = logging.getLogger(__name__)
 
 
+# Bound on per-event drain retries: a transient source flap recovers
+# within a few poll cycles; a permanent per-event failure must not
+# occupy a queue slot and a deferral forever.
+_DRAIN_RETRY_MAX = 5
+
+
 class ProtocolRuntime:
     def __init__(
         self,
@@ -38,8 +44,8 @@ class ProtocolRuntime:
         self.prefix = prefix
         self.task: asyncio.Task[None] | None = None
         self._listener_cleanup: Callable[[], Awaitable[None]] | None = None
-        self.hooks: asyncio.Queue[tuple[HookEvent, tuple[str, ...]]] = asyncio.Queue(
-            256
+        self.hooks: asyncio.Queue[tuple[HookEvent, tuple[str, ...], int]] = (
+            asyncio.Queue(256)
         )
 
     def set_listener_cleanup(
@@ -51,7 +57,7 @@ class ProtocolRuntime:
         # A remote observer never blocks the Telegram monitor or its receipts.
         sessions = self.service.defer_hook(event, self.prefix)
         try:
-            self.hooks.put_nowait((event, sessions))
+            self.hooks.put_nowait((event, sessions, 0))
         except asyncio.QueueFull:
             # The evidence is lost, so the deferral it reserved must be
             # rolled back: a dropped hook may not brick the session until
@@ -67,19 +73,42 @@ class ProtocolRuntime:
             try:
                 await self.service.refresh()
                 while not self.hooks.empty():
-                    event, sessions = self.hooks.get_nowait()
+                    event, sessions, attempt = self.hooks.get_nowait()
                     try:
                         await self.service.observe_hook(event, prefix)
                     except ProtocolError, OSError:
-                        # A transient source failure must not consume the
-                        # queued evidence: the event goes back (a slot
-                        # was just freed; a racing refill that hits the
-                        # cap drops it with the deferral rolled back)
-                        # and the drain retries next cycle.
+                        # ProtocolError covers both a transient source
+                        # flap and a permanent per-event failure (an
+                        # unreadable transcript raises the same 503), so
+                        # transience cannot be decided by type: retry a
+                        # bounded number of cycles, then drop the event
+                        # with its deferral released rather than churn at
+                        # 1 Hz on a slot forever.
+                        if attempt + 1 >= _DRAIN_RETRY_MAX:
+                            self.service.resolve_hook(sessions)
+                            logger.warning(
+                                "Dropping hook evidence for %s after %d "
+                                "failed observations",
+                                event.event_type,
+                                _DRAIN_RETRY_MAX,
+                                exc_info=True,
+                            )
+                            continue
+                        logger.warning(
+                            "Hook observation failed; retrying next cycle "
+                            "(attempt %d/%d)",
+                            attempt + 1,
+                            _DRAIN_RETRY_MAX,
+                            exc_info=True,
+                        )
                         try:
-                            self.hooks.put_nowait((event, sessions))
+                            self.hooks.put_nowait((event, sessions, attempt + 1))
                         except asyncio.QueueFull:
                             self.service.resolve_hook(sessions)
+                            logger.error(
+                                "Protocol hook queue full on retry; dropped "
+                                "hook evidence, deferral rolled back"
+                            )
                         break
                     except Exception:  # noqa: BLE001
                         # A per-event failure (e.g. malformed transcript

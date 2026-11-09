@@ -165,15 +165,9 @@ def clock_store(monkeypatch):
     from ccgram.session_protocol.events import EventHub
 
     store = requests_module.RequestStore(EventHub())
-    clock = {"now": monotonic_now()}
+    clock = {"now": time.monotonic()}
     monkeypatch.setattr(requests_module, "monotonic", lambda: clock["now"])
     return store, clock
-
-
-def monotonic_now() -> float:
-    import time
-
-    return time.monotonic()
 
 
 async def test_source_outage_defers_then_ttl_expires(
@@ -186,16 +180,11 @@ async def test_source_outage_defers_then_ttl_expires(
     once it outlives the TTL window it expires on its own instead of
     waiting for a manual bridge restart.
     """
-    frozen_store, clock = clock_store
+    _store, clock = clock_store
     path = tmp_path / "transcript.jsonl"
     path.touch()
     backend.target = replace(backend.target, transcript=path)
     session = (await service.list_sessions())[0]
-    # re-anchor the service store onto the frozen clock
-    real_monotonic = time.monotonic
-    monkeypatch.setattr(
-        "ccgram.session_protocol.requests.monotonic", lambda: clock["now"]
-    )
     monkeypatch.setattr(
         "ccgram.session_protocol.runtime.asyncio.sleep",
         AsyncMock(side_effect=asyncio.CancelledError),
@@ -212,15 +201,9 @@ async def test_source_outage_defers_then_ttl_expires(
         with pytest.raises(asyncio.CancelledError):
             await runtime.poll("")
         assert service.requests.has_deferred(session.id) is True
-        clock["now"] = (
-            real_monotonic()
-            + (
-                __import__(
-                    "ccgram.session_protocol.requests", fromlist=["x"]
-                )._DEFERRED_TTL_S
-            )
-            + 1
-        )
+        import ccgram.session_protocol.requests as requests_module
+
+        clock["now"] += requests_module._DEFERRED_TTL_S + 1
         assert service.requests.has_deferred(session.id) is False
 
 
@@ -322,3 +305,42 @@ async def test_transient_flap_preserves_queued_tail(
         # The event went back to the queue and its deferral is held.
         assert runtime.hooks.qsize() == 1
         assert service.requests.has_deferred(session.id) is True
+
+
+async def test_permanent_failure_drops_after_bounded_retries(
+    service, backend, store, tmp_path, monkeypatch
+):
+    """A permanently failing observation must not churn a slot forever.
+
+    Code review: ProtocolError also covers permanent per-event failures
+    (an unreadable transcript raises the same 503), so type alone
+    cannot decide transience. After the retry bound the event is
+    dropped with its deferral released, instead of requeueing at 1 Hz
+    for the process lifetime.
+    """
+    import ccgram.session_protocol.runtime as runtime_module
+
+    path = tmp_path / "transcript.jsonl"
+    path.touch()
+    backend.target = replace(backend.target, transcript=path)
+    session = (await service.list_sessions())[0]
+    sleeps: list = [None] * runtime_module._DRAIN_RETRY_MAX
+    monkeypatch.setattr(
+        "ccgram.session_protocol.runtime.asyncio.sleep",
+        AsyncMock(side_effect=[*sleeps, asyncio.CancelledError()]),
+    )
+
+    async def always_unavailable(event, prefix):
+        raise ProtocolError(503, "backend_unavailable", "permanent")
+
+    monkeypatch.setattr(service, "observe_hook", always_unavailable)
+    event = HookEvent(
+        "PermissionRequest", "@1", "conv", {"tool_name": "Bash"}, time.time()
+    )
+    with TemporaryFile() as lock:
+        runtime = ProtocolRuntime(store, service, lock)
+        runtime.observe_hook(event)
+        with pytest.raises(asyncio.CancelledError):
+            await runtime.poll("")
+        assert runtime.hooks.qsize() == 0  # dropped, not requeued forever
+        assert not service.requests.has_deferred(session.id)
