@@ -6,6 +6,8 @@ import hashlib
 import json
 import re
 import time
+from collections import deque
+from time import monotonic
 from dataclasses import dataclass
 from typing import Any
 
@@ -138,7 +140,9 @@ def _response_options(
 
 
 # A deferral normally lives one poller cycle (~1s). Older ones are
-# evidence of a lost resolve path; they expire rather than block.
+# evidence of a lost resolve path; they expire rather than block. Stamps
+# are per reservation, not per session: a stranded old reservation must
+# not be kept alive by newer hook traffic refreshing a shared stamp.
 _DEFERRED_TTL_S = 30.0
 
 
@@ -150,7 +154,7 @@ class RequestStore:
         self._hook_prompts: dict[str, tuple[PendingHook, str, int]] = {}
         self._consumed_hooks: list[tuple[str, HookIdentity]] = []
         self._latest_hooks: dict[str, HookIdentity] = {}
-        self._deferred: dict[str, tuple[int, float]] = {}
+        self._deferred: dict[str, deque[float]] = {}
 
     def get(self, session_id: str) -> OpenRequest | None:
         return self._open.get(session_id)
@@ -162,41 +166,52 @@ class RequestStore:
             and (self._hooks.get(session_id) == request.observed_hook)
         )
 
-    def defer(self, session_id: str) -> None:
-        count = self._deferred.get(session_id, (0, 0.0))[0]
-        self._deferred[session_id] = (count + 1, time.monotonic())
+    def _drop_stale(self, session_id: str, stamps: deque[float]) -> bool:
+        """Expire reservations older than the TTL, wherever they sit.
 
-    def resolve(self, session_id: str) -> None:
-        # A TTL expiry may have dropped the entry while the hook queue
-        # still held reservations for it: resolving a gone entry is the
-        # normal end of that path, not an error (task-65).
-        entry = self._deferred.get(session_id)
-        if entry is None:
-            return
-        count, deferred_at = entry
-        if count == 1:
-            self._deferred.pop(session_id)
-        else:
-            self._deferred[session_id] = (count - 1, deferred_at)
-
-    def has_deferred(self, session_id: str) -> bool:
-        entry = self._deferred.get(session_id)
-        if entry is None:
-            return False
-        deferred_at = entry[1]
-        # Backstop for a lost resolve: leak residue expires instead of
-        # blocking the session forever (task-65). defer() is the only
-        # stamp writer, so the TTL anchors at the last defer.
-        age = time.monotonic() - deferred_at
-        if age > _DEFERRED_TTL_S:
-            self._deferred.pop(session_id, None)
+        Backstop for a lost resolve: leak residue expires instead of
+        blocking the session forever (task-65). Expiry is by absolute
+        age across the whole deque: a stranded reservation cannot be
+        kept alive by newer hook traffic rotating younger stamps past a
+        head-only check. Returns whether any live stamp remains.
+        """
+        now = monotonic()
+        live = deque(s for s in stamps if now - s <= _DEFERRED_TTL_S)
+        expired = len(stamps) - len(live)
+        if expired:
             logger.warning(
-                "Expired stale hook deferral for %s after %.0fs",
+                "Expired %d stale hook deferral(s) for %s after %.0fs",
+                expired,
                 session_id,
-                age,
+                _DEFERRED_TTL_S,
             )
+        stamps.clear()
+        stamps.extend(live)
+        if not stamps:
+            self._deferred.pop(session_id, None)
             return False
         return True
+
+    def defer(self, session_id: str) -> None:
+        self._deferred.setdefault(session_id, deque()).append(monotonic())
+
+    def resolve(self, session_id: str) -> None:
+        # A TTL expiry may have dropped reservations the hook queue still
+        # balances against: resolving past them is the normal end of that
+        # path, not an error (task-65). FIFO: the oldest live reservation
+        # goes first, matching the drain's enqueue order.
+        stamps = self._deferred.get(session_id)
+        if stamps is None or not self._drop_stale(session_id, stamps):
+            return
+        stamps.popleft()
+        if not stamps:
+            self._deferred.pop(session_id, None)
+
+    def has_deferred(self, session_id: str) -> bool:
+        stamps = self._deferred.get(session_id)
+        if stamps is None:
+            return False
+        return self._drop_stale(session_id, stamps)
 
     def observe_hook(self, session_id: str, hook: PendingHook) -> None:
         if self.observe_identity(session_id, hook.identity):

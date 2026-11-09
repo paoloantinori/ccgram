@@ -70,9 +70,21 @@ class ProtocolRuntime:
                     event, sessions = self.hooks.get_nowait()
                     try:
                         await self.service.observe_hook(event, prefix)
+                    except ProtocolError, OSError:
+                        # A transient source failure must not consume the
+                        # queued evidence: the event goes back (a slot
+                        # was just freed; a racing refill that hits the
+                        # cap drops it with the deferral rolled back)
+                        # and the drain retries next cycle.
+                        try:
+                            self.hooks.put_nowait((event, sessions))
+                        except asyncio.QueueFull:
+                            self.service.resolve_hook(sessions)
+                        break
                     except Exception:  # noqa: BLE001
-                        # A failing observation must not kill the drain
-                        # loop (task-65): log and keep draining.
+                        # A per-event failure (e.g. malformed transcript
+                        # data) must not kill the drain loop (task-65):
+                        # log and keep draining.
                         logger.warning("Hook observation failed", exc_info=True)
                     # Every defer is balanced by exactly one resolve,
                     # whatever the observation outcome.

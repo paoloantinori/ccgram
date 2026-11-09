@@ -11,7 +11,7 @@ import pytest
 
 from ccgram.providers.base import HookEvent
 from ccgram.session_protocol.backend import Prompt
-from ccgram.session_protocol.models import Action
+from ccgram.session_protocol.models import Action, ProtocolError
 from ccgram.session_protocol.requests import PendingHook
 from ccgram.session_protocol.runtime import ProtocolRuntime
 
@@ -153,8 +153,31 @@ async def test_overflowed_hook_rolls_back_deferral(
     assert not service.requests.has_deferred(session.id)
 
 
+@pytest.fixture
+def clock_store(monkeypatch):
+    """A RequestStore whose TTL clock is a scoped fake.
+
+    The module imports monotonic directly, so patching the module-local
+    name scopes the fake to the code under test instead of freezing the
+    stdlib clock for the whole event loop.
+    """
+    import ccgram.session_protocol.requests as requests_module
+    from ccgram.session_protocol.events import EventHub
+
+    store = requests_module.RequestStore(EventHub())
+    clock = {"now": monotonic_now()}
+    monkeypatch.setattr(requests_module, "monotonic", lambda: clock["now"])
+    return store, clock
+
+
+def monotonic_now() -> float:
+    import time
+
+    return time.monotonic()
+
+
 async def test_source_outage_defers_then_ttl_expires(
-    service, backend, store, tmp_path, monkeypatch
+    service, backend, store, tmp_path, monkeypatch, clock_store
 ):
     """A down source keeps queued deferrals, the TTL bounds the outage.
 
@@ -163,24 +186,20 @@ async def test_source_outage_defers_then_ttl_expires(
     once it outlives the TTL window it expires on its own instead of
     waiting for a manual bridge restart.
     """
-    import ccgram.session_protocol.requests as requests_module
-
+    frozen_store, clock = clock_store
     path = tmp_path / "transcript.jsonl"
     path.touch()
     backend.target = replace(backend.target, transcript=path)
     session = (await service.list_sessions())[0]
-    clock = {"now": time.monotonic()}
-    real_monotonic = requests_module.time.monotonic
+    # re-anchor the service store onto the frozen clock
+    real_monotonic = time.monotonic
     monkeypatch.setattr(
-        requests_module.time,
-        "monotonic",
-        lambda: clock["now"],
+        "ccgram.session_protocol.requests.monotonic", lambda: clock["now"]
     )
     monkeypatch.setattr(
         "ccgram.session_protocol.runtime.asyncio.sleep",
         AsyncMock(side_effect=asyncio.CancelledError),
     )
-
     monkeypatch.setattr(
         service.backend, "targets", AsyncMock(side_effect=OSError("down"))
     )
@@ -193,23 +212,28 @@ async def test_source_outage_defers_then_ttl_expires(
         with pytest.raises(asyncio.CancelledError):
             await runtime.poll("")
         assert service.requests.has_deferred(session.id) is True
-        clock["now"] = real_monotonic() + requests_module._DEFERRED_TTL_S + 1
+        clock["now"] = (
+            real_monotonic()
+            + (
+                __import__(
+                    "ccgram.session_protocol.requests", fromlist=["x"]
+                )._DEFERRED_TTL_S
+            )
+            + 1
+        )
         assert service.requests.has_deferred(session.id) is False
 
 
-def test_stale_deferral_expires(monkeypatch):
+def test_stale_deferral_expires(clock_store):
     """The TTL backstop: a deferral older than the window unblocks itself.
 
     Belt and braces for any lost-resolve path the rollbacks above do not
     cover: the poller drains within ~1s, so an unexpired stale deferral
     can only be leak residue, and it expires instead of persisting.
     """
+    store, clock = clock_store
     import ccgram.session_protocol.requests as requests_module
-    from ccgram.session_protocol.events import EventHub
 
-    store = requests_module.RequestStore(EventHub())
-    clock = {"now": 1000.0}
-    monkeypatch.setattr(requests_module.time, "monotonic", lambda: clock["now"])
     store.defer("s")
     assert store.has_deferred("s") is True
     clock["now"] += requests_module._DEFERRED_TTL_S + 1
@@ -217,7 +241,31 @@ def test_stale_deferral_expires(monkeypatch):
     assert "s" not in store._deferred
 
 
-def test_resolve_after_ttl_expiry_is_a_noop(monkeypatch):
+def test_stranded_residue_expires_once_traffic_stops(clock_store):
+    """A stranded reservation cannot outlive the traffic around it.
+
+    Code review reproduced an aggregate-stamp design where one lost
+    reservation plus 5s hook traffic kept the session 409-blocked at
+    t+1000s. With per-reservation stamps the mid-flow deferral is
+    legitimate (real evidence is in flight at the gate's granularity);
+    the binding contract is what happens when the flow stops: the
+    residue ages from ITS OWN last push and expires within the TTL,
+    instead of surviving on a stamp refreshed by unrelated traffic.
+    """
+    store, clock = clock_store
+    import ccgram.session_protocol.requests as requests_module
+
+    store.defer("s")  # the reservation whose resolve is lost
+    for _ in range(200):
+        clock["now"] += 5.0
+        store.defer("s")
+        store.resolve("s")  # steady traffic, balanced each cycle
+    clock["now"] += requests_module._DEFERRED_TTL_S + 1
+    assert store.has_deferred("s") is False
+    assert "s" not in store._deferred
+
+
+def test_resolve_after_ttl_expiry_is_a_noop(clock_store):
     """Resolving a reservation whose entry already expired must not raise.
 
     The hook queue can still hold events reserving a deferral that the
@@ -225,15 +273,52 @@ def test_resolve_after_ttl_expiry_is_a_noop(monkeypatch):
     outside the drain's inner except, so a KeyError there would kill the
     poll task (task-65).
     """
+    store, clock = clock_store
     import ccgram.session_protocol.requests as requests_module
-    from ccgram.session_protocol.events import EventHub
 
-    store = requests_module.RequestStore(EventHub())
-    clock = {"now": 1000.0}
-    real_monotonic = requests_module.time.monotonic
-    monkeypatch.setattr(requests_module.time, "monotonic", lambda: clock["now"])
     store.defer("s")
-    clock["now"] = real_monotonic() + requests_module._DEFERRED_TTL_S + 1
+    clock["now"] += requests_module._DEFERRED_TTL_S + 1
     assert store.has_deferred("s") is False
     store.resolve("s")  # the queued reservation balances against nothing
     assert "s" not in store._deferred
+
+
+async def test_transient_flap_preserves_queued_tail(
+    service, backend, store, tmp_path, monkeypatch
+):
+    """A transient observe failure must requeue the event, not drop it.
+
+    Code review: the blanket drain guard consumed every remaining queued
+    event on the first flap, destroying up to 256 evidence hooks. The
+    per-event arm keeps draining for data errors only; a source flap
+    puts the event back and retries next cycle, with the deferral held.
+    """
+    path = tmp_path / "transcript.jsonl"
+    path.touch()
+    backend.target = replace(backend.target, transcript=path)
+    session = (await service.list_sessions())[0]
+    monkeypatch.setattr(
+        "ccgram.session_protocol.runtime.asyncio.sleep",
+        AsyncMock(side_effect=asyncio.CancelledError),
+    )
+    event = HookEvent(
+        "PermissionRequest", "@1", "conv", {"tool_name": "Bash"}, time.time()
+    )
+    with TemporaryFile() as lock:
+        runtime = ProtocolRuntime(store, service, lock)
+        runtime.observe_hook(event)
+        flapped = {"done": False}
+        real_observe = service.observe_hook
+
+        async def flap_once(event, prefix):
+            if not flapped["done"]:
+                flapped["done"] = True
+                raise ProtocolError(503, "backend_unavailable", "flap")
+            return await real_observe(event, prefix)
+
+        monkeypatch.setattr(service, "observe_hook", flap_once)
+        with pytest.raises(asyncio.CancelledError):
+            await runtime.poll("")
+        # The event went back to the queue and its deferral is held.
+        assert runtime.hooks.qsize() == 1
+        assert service.requests.has_deferred(session.id) is True
