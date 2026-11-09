@@ -45,7 +45,7 @@ from the transcript root (`handlers/provider_display.py`).
   before committing; pyright on touched files.
 - Fork features go in ccgram-ext via the seam, never in upstream-hot
   core files; the core delta stays at the loader plus the two
-  message-queue emits (design: docs/extension-seam.md).
+  message-queue emits (design: README of the ccgram-ext package).
 - NEVER propose the seam or fork features upstream without explicit user
   agreement first (standing instruction 2026-08-31).
 - Local task tracking: backlog/tasks/ with a task-N file per task; mark
