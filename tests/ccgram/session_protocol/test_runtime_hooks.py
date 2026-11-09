@@ -121,10 +121,17 @@ async def test_pending_hooks_release_only_after_transcript_processing(
         assert service.requests.get(session.id) is None
 
 
-@pytest.mark.parametrize("failure", ["overflow", "processing"])
-async def test_lost_hook_processing_keeps_session_blocked(
-    service, backend, store, tmp_path, monkeypatch, failure
+async def test_overflowed_hook_rolls_back_deferral(
+    service, backend, store, tmp_path, monkeypatch
 ):
+    """Dropped evidence must not brick the session until a restart.
+
+    Incident 2026-11-09: a 10h source outage overflowed the hook queue
+    575 times and every dropped hook left its session deferred forever,
+    so plain messages hit 409 "Hook evidence awaits processing" until a
+    manual bridge restart. Now the overflowed event's deferral is
+    rolled back at drop time; the queued ones resolve in the drain.
+    """
     path = tmp_path / "transcript.jsonl"
     path.touch()
     backend.target = replace(backend.target, transcript=path)
@@ -133,25 +140,100 @@ async def test_lost_hook_processing_keeps_session_blocked(
         "ccgram.session_protocol.runtime.asyncio.sleep",
         AsyncMock(side_effect=asyncio.CancelledError),
     )
+    event = HookEvent(
+        "PermissionRequest", "@1", "conv", {"tool_name": "Bash"}, time.time()
+    )
     with TemporaryFile() as lock:
         runtime = ProtocolRuntime(store, service, lock)
-        event = HookEvent(
-            "PermissionRequest" if failure == "processing" else "Stop",
-            "@1",
-            "conv",
-            {"tool_name": "Bash"},
-            time.time(),
-        )
-        for _ in range(257 if failure == "overflow" else 1):
+        for _ in range(257):
             runtime.observe_hook(event)
-        if failure == "processing":
-
-            def unavailable(path, provider):
-                raise OSError("transcript unavailable")
-
-            monkeypatch.setattr(
-                "ccgram.session_protocol.service.read_entries", unavailable
-            )
+        assert runtime.hooks.qsize() == 256  # the 257th was dropped
         with pytest.raises(asyncio.CancelledError):
             await runtime.poll("")
-    assert service.requests.has_deferred(session.id)
+    assert not service.requests.has_deferred(session.id)
+
+
+async def test_source_outage_defers_then_ttl_expires(
+    service, backend, store, tmp_path, monkeypatch
+):
+    """A down source keeps queued deferrals, the TTL bounds the outage.
+
+    While the source is unavailable the drain cannot process, so the
+    deferral legitimately persists (the evidence is queued, not lost);
+    once it outlives the TTL window it expires on its own instead of
+    waiting for a manual bridge restart.
+    """
+    import ccgram.session_protocol.requests as requests_module
+
+    path = tmp_path / "transcript.jsonl"
+    path.touch()
+    backend.target = replace(backend.target, transcript=path)
+    session = (await service.list_sessions())[0]
+    clock = {"now": time.monotonic()}
+    real_monotonic = requests_module.time.monotonic
+    monkeypatch.setattr(
+        requests_module.time,
+        "monotonic",
+        lambda: clock["now"],
+    )
+    monkeypatch.setattr(
+        "ccgram.session_protocol.runtime.asyncio.sleep",
+        AsyncMock(side_effect=asyncio.CancelledError),
+    )
+
+    monkeypatch.setattr(
+        service.backend, "targets", AsyncMock(side_effect=OSError("down"))
+    )
+    event = HookEvent(
+        "PermissionRequest", "@1", "conv", {"tool_name": "Bash"}, time.time()
+    )
+    with TemporaryFile() as lock:
+        runtime = ProtocolRuntime(store, service, lock)
+        runtime.observe_hook(event)
+        with pytest.raises(asyncio.CancelledError):
+            await runtime.poll("")
+        assert service.requests.has_deferred(session.id) is True
+        clock["now"] = real_monotonic() + requests_module._DEFERRED_TTL_S + 1
+        assert service.requests.has_deferred(session.id) is False
+
+
+def test_stale_deferral_expires(monkeypatch):
+    """The TTL backstop: a deferral older than the window unblocks itself.
+
+    Belt and braces for any lost-resolve path the rollbacks above do not
+    cover: the poller drains within ~1s, so an unexpired stale deferral
+    can only be leak residue, and it expires instead of persisting.
+    """
+    import ccgram.session_protocol.requests as requests_module
+    from ccgram.session_protocol.events import EventHub
+
+    store = requests_module.RequestStore(EventHub())
+    clock = {"now": 1000.0}
+    monkeypatch.setattr(requests_module.time, "monotonic", lambda: clock["now"])
+    store.defer("s")
+    assert store.has_deferred("s") is True
+    clock["now"] += requests_module._DEFERRED_TTL_S + 1
+    assert store.has_deferred("s") is False
+    assert "s" not in store._deferred
+
+
+def test_resolve_after_ttl_expiry_is_a_noop(monkeypatch):
+    """Resolving a reservation whose entry already expired must not raise.
+
+    The hook queue can still hold events reserving a deferral that the
+    TTL has already popped; resolve is their balance point and runs
+    outside the drain's inner except, so a KeyError there would kill the
+    poll task (task-65).
+    """
+    import ccgram.session_protocol.requests as requests_module
+    from ccgram.session_protocol.events import EventHub
+
+    store = requests_module.RequestStore(EventHub())
+    clock = {"now": 1000.0}
+    real_monotonic = requests_module.time.monotonic
+    monkeypatch.setattr(requests_module.time, "monotonic", lambda: clock["now"])
+    store.defer("s")
+    clock["now"] = real_monotonic() + requests_module._DEFERRED_TTL_S + 1
+    assert store.has_deferred("s") is False
+    store.resolve("s")  # the queued reservation balances against nothing
+    assert "s" not in store._deferred

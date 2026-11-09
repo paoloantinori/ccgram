@@ -9,11 +9,15 @@ import time
 from dataclasses import dataclass
 from typing import Any
 
+import structlog
+
 from .backend import Prompt
 from .events import EventHub
 from .messages import tool_kind
 from .models import CLOSE_REASONS, Request, RequestOption, utc_now
 from .store import new_id
+
+logger = structlog.get_logger()
 
 _HOOK_MATCH_TTL = 30
 _MIN_MENU_OPTIONS = 2
@@ -133,6 +137,11 @@ def _response_options(
     return options, keys, answers, response_schema
 
 
+# A deferral normally lives one poller cycle (~1s). Older ones are
+# evidence of a lost resolve path; they expire rather than block.
+_DEFERRED_TTL_S = 30.0
+
+
 class RequestStore:
     def __init__(self, hub: EventHub) -> None:
         self.hub = hub
@@ -141,7 +150,7 @@ class RequestStore:
         self._hook_prompts: dict[str, tuple[PendingHook, str, int]] = {}
         self._consumed_hooks: list[tuple[str, HookIdentity]] = []
         self._latest_hooks: dict[str, HookIdentity] = {}
-        self._deferred: dict[str, int] = {}
+        self._deferred: dict[str, tuple[int, float]] = {}
 
     def get(self, session_id: str) -> OpenRequest | None:
         return self._open.get(session_id)
@@ -154,17 +163,40 @@ class RequestStore:
         )
 
     def defer(self, session_id: str) -> None:
-        self._deferred[session_id] = self._deferred.get(session_id, 0) + 1
+        count = self._deferred.get(session_id, (0, 0.0))[0]
+        self._deferred[session_id] = (count + 1, time.monotonic())
 
     def resolve(self, session_id: str) -> None:
-        count = self._deferred[session_id]
+        # A TTL expiry may have dropped the entry while the hook queue
+        # still held reservations for it: resolving a gone entry is the
+        # normal end of that path, not an error (task-65).
+        entry = self._deferred.get(session_id)
+        if entry is None:
+            return
+        count, deferred_at = entry
         if count == 1:
             self._deferred.pop(session_id)
         else:
-            self._deferred[session_id] = count - 1
+            self._deferred[session_id] = (count - 1, deferred_at)
 
     def has_deferred(self, session_id: str) -> bool:
-        return session_id in self._deferred
+        entry = self._deferred.get(session_id)
+        if entry is None:
+            return False
+        deferred_at = entry[1]
+        # Backstop for a lost resolve: leak residue expires instead of
+        # blocking the session forever (task-65). defer() is the only
+        # stamp writer, so the TTL anchors at the last defer.
+        age = time.monotonic() - deferred_at
+        if age > _DEFERRED_TTL_S:
+            self._deferred.pop(session_id, None)
+            logger.warning(
+                "Expired stale hook deferral for %s after %.0fs",
+                session_id,
+                age,
+            )
+            return False
+        return True
 
     def observe_hook(self, session_id: str, hook: PendingHook) -> None:
         if self.observe_identity(session_id, hook.identity):

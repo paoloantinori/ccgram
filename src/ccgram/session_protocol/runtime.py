@@ -53,8 +53,14 @@ class ProtocolRuntime:
         try:
             self.hooks.put_nowait((event, sessions))
         except asyncio.QueueFull:
-            # Lost evidence must keep affected approvals blocked until restart.
-            logger.error("Protocol hook queue full; affected approvals require restart")
+            # The evidence is lost, so the deferral it reserved must be
+            # rolled back: a dropped hook may not brick the session until
+            # a restart (incident 2026-11-09). Approvals fall back to
+            # their pre-event state.
+            self.service.resolve_hook(sessions)
+            logger.error(
+                "Protocol hook queue full; dropped hook evidence, deferral rolled back"
+            )
 
     async def poll(self, prefix: str) -> None:
         while True:
@@ -62,7 +68,14 @@ class ProtocolRuntime:
                 await self.service.refresh()
                 while not self.hooks.empty():
                     event, sessions = self.hooks.get_nowait()
-                    await self.service.observe_hook(event, prefix)
+                    try:
+                        await self.service.observe_hook(event, prefix)
+                    except Exception:  # noqa: BLE001
+                        # A failing observation must not kill the drain
+                        # loop (task-65): log and keep draining.
+                        logger.warning("Hook observation failed", exc_info=True)
+                    # Every defer is balanced by exactly one resolve,
+                    # whatever the observation outcome.
                     self.service.resolve_hook(sessions)
             except ProtocolError, OSError:
                 logger.warning("Session protocol source unavailable", exc_info=True)
