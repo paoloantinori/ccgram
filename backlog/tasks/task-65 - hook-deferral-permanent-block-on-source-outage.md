@@ -1,6 +1,10 @@
 # Task 65: hook deferral permanently blocks plain messages after a source outage
 
-Status: open (incident 2026-11-09, Mac bridge, user-facing)
+Status: done (fix 71b5136c, deployed both bridges 2026-11-09)
+
+- Overflow rollback: a dropped hook releases its reservation at drop time.
+- Drain guard: a failing observation logs and keeps draining; one resolve per defer regardless of outcome.
+- TTL backstop: deferrals expire 30s after their last defer (same horizon as queued-hook evidence); resolve tolerates an already-expired entry (the KeyError hazard two reviewers found independently).
 
 ## Incident
 
