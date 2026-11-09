@@ -170,7 +170,10 @@ def setup_logging(log_level: str) -> None:
             structlog.contextvars.merge_contextvars,
             structlog.stdlib.add_log_level,
             structlog.stdlib.PositionalArgumentsFormatter(),
-            structlog.processors.TimeStamper(fmt="%H:%M:%S"),
+            # Dated stamps: the bridge log spans weeks and every incident
+            # runbook greps it day-less; time-only stamps made old-day
+            # lines read as today's (three misdiagnoses).
+            structlog.processors.TimeStamper(fmt="%Y-%m-%d %H:%M:%S"),
             structlog.processors.StackInfoRenderer(),
             structlog.processors.format_exc_info,
             _dim_debug_event,
@@ -201,7 +204,7 @@ def setup_logging(log_level: str) -> None:
             foreign_pre_chain=[
                 structlog.stdlib.add_log_level,
                 structlog.stdlib.add_logger_name,
-                structlog.processors.TimeStamper(fmt="%H:%M:%S"),
+                structlog.processors.TimeStamper(fmt="%Y-%m-%d %H:%M:%S"),
             ],
         )
     )
