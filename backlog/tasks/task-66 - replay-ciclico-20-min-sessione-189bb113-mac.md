@@ -35,3 +35,25 @@ Status: open (incident 2026-11-09, Mac bridge, in corso)
 
 Restart del bridge Mac (kill + respawn del daemon) azzera i blocchi
 in-memory e ferma il ciclo finche' non riparte.
+
+## Evidenze aggiuntive (2026-11-09 pomeriggio)
+
+- Il transcript 189bb113 (43.7 MB) e' fermo al 8 nov 15:56: NESSUNA entry
+  nuova dal momento del caos. Le consegne ripetute sono byte vecchi
+  riletti: non e' l'agente che produce output identico.
+- Il binding del window 86a597df (la sessione home) e' MIGRATO dal topic
+  auto-creato 153932 al topic 172265: il window e' vivo, bindato e con
+  la succession fix ora e' coperto dai prossimi /clear.
+- La deferral che genera i replay vive SOLO in memoria: il watermark
+  persistito e' a EOF (43728622, gap 0) e parsed_offset non e' persistito
+  per quella sessione. Qualcosa ogni ~20 minuti riazzerà l'offset
+  in-memory.
+- Candidati da indagare: il reconciler che riadopta la sessione dal
+  session_map a ogni giro (offset di adoption?), un timer della herdr
+  agent-status push, o il ciclo di riconciliazione dei target.
+
+## Chiusura incidente sul campo
+
+Restart del bridge Mac alle ~15:20 CET ha fermato il burst (dopo 11
+consegne). Il ciclo e' ripreso alle 00:08. La mitigazione resta il
+restart; la prevenzione richiede il pin del meccanismo.
