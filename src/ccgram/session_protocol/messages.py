@@ -567,9 +567,12 @@ def _claude_chat_kind(data: dict[str, Any]) -> str | None:
         return kind
     # Positive discriminator, fail closed: the zai variant writes real chat
     # turns as bare api-request-blob rows carrying the claude transcript
-    # identity keys (uuid; timestamp too). Upstream's diagnostic envelopes
-    # never carry uuid, with or without their payload/source wrapper, so
-    # only the zai shape is admitted and every other blob stays internal.
+    # identity key (uuid). Upstream's diagnostic envelopes never carry
+    # uuid, with or without their payload/source wrapper, so only the zai
+    # shape is admitted and every other blob stays internal. If a future
+    # zai writer drops uuid from chat rows, those turns vanish here: the
+    # pin tests in test_system_role_suppression hold both ends of this
+    # contract.
     if (
         kind == "api-request-blob"
         and "uuid" in data

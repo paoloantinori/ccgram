@@ -1129,24 +1129,28 @@ async def _handle_new_window_locked(
 
     topic_name = _default_topic_name(event)
 
+    is_automatic = target_user_id is None and target_chat_id is None
+
     # One admission checkpoint for every automatic path: the rebind and
     # the creation below must answer to the same marked-mode policy, so
     # an unmarked window cannot take a dead family topic either. Targeted
-    # callers explicitly want a topic and skip the check.
-    if (
-        target_user_id is None
-        and target_chat_id is None
-        and live_windows is not None
-        and find_adoptable_window(live_windows, event.window_id) is None
-    ):
-        return False
+    # callers explicitly want a topic and skip the check. A caller that
+    # arrives without the listing still gets the gate: the checkpoint
+    # fetches the confirmed listing itself rather than trusting the
+    # caller to have plumbed one.
+    if is_automatic:
+        if live_windows is None:
+            live_windows = await confirmed_adoption_listing(event.window_id)
+        if (
+            live_windows is None
+            or find_adoptable_window(live_windows, event.window_id) is None
+        ):
+            return False
 
     # Automatic adoption only: a targeted caller explicitly wants a new
     # topic in a chosen chat and must not have it stolen.
-    if (
-        target_user_id is None
-        and target_chat_id is None
-        and await maybe_rebind_family_topic(event, client, live_windows=live_windows)
+    if is_automatic and await maybe_rebind_family_topic(
+        event, client, live_windows=live_windows
     ):
         return True
 
@@ -1169,7 +1173,7 @@ async def _handle_new_window_locked(
                 event.window_id,
                 topic_name,
                 user_id=target_user_id,
-                automatic=target_user_id is None,
+                automatic=is_automatic,
                 admission_windows=live_windows,
             )
         )

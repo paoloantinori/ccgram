@@ -24,7 +24,8 @@ from ccgram.handlers.topics.topic_orchestration import (  # noqa: E501
     is_pending_creation,
     register_pending_creation,
 )
-from ccgram.handlers.topics import topic_orchestration  # type: ignore[attr-defined]
+from ccgram.handlers.topics import topic_orchestration
+from ccgram.multiplexer.base import WindowRef  # type: ignore[attr-defined]
 from ccgram.session_monitor import NewWindowEvent
 
 
@@ -153,6 +154,14 @@ async def test_handle_new_window_proceeds_when_not_pending(monkeypatch):
     monkeypatch.setattr(topic_orchestration, "create_topic_in_chat", create_topic_mock)
     monkeypatch.setattr(topic_orchestration, "_auto_detect_provider", AsyncMock())
     monkeypatch.setattr(topic_orchestration, "collect_target_chats", lambda _wid: {123})
+    # The admission checkpoint fetches its own listing when the caller
+    # brings none; this test targets the pending-creation race, so the
+    # listing is a plain eligible ref.
+    monkeypatch.setattr(
+        topic_orchestration,
+        "confirmed_adoption_listing",
+        AsyncMock(return_value=[WindowRef("@42", "test-window", "/tmp")]),
+    )
 
     client = MagicMock()
     await handle_new_window(_make_event(), client)

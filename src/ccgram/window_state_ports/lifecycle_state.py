@@ -58,7 +58,10 @@ def window_is_adoptable(window: "WindowRef") -> bool:
     Closes over the configured discovery mode and the detach/quarantine
     mark state so every call site asks the same question; the pure
     policy stays in ``topic_discovery.should_adopt_window`` for table
-    tests.
+    tests. Reads the GLOBAL config singleton on purpose: admission is
+    process-wide policy, so tests must patch ``ccgram.config.config``
+    directly; patching a module-level ``config`` seam does not reach
+    this helper.
     """
     # Lazy: config is only needed on admission questions.
     from ..config import config

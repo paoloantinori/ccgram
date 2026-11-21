@@ -47,3 +47,18 @@ def test_user_and_agent_still_parse_and_render():
     assert [record.role for _, record in records] == ["user", "agent"]
     rendered = render_protocol_records("s", "claude", records, TranscriptParserState())
     assert [m.text for m in rendered] == ["hello", "hi"]
+
+
+def test_bare_blob_without_uuid_stays_internal():
+    """The discriminator's excluded shape, pinned.
+
+    A payload-less, source-less api-request-blob with a chat-role message
+    and NO uuid is upstream's bare monitor-envelope shape, not a zai chat
+    turn: it must never become a delivered record.
+    """
+    raw = {
+        "type": "api-request-blob",
+        "message": {"role": "assistant", "content": "INTERNAL_CONTEXT"},
+    }
+    records, _ = parse_records([SourceEntry(0, raw)], "claude")
+    assert list(records) == []

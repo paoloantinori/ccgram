@@ -20,7 +20,6 @@ from ...topic_selection import (
 from ...window_state_ports import lifecycle_state
 from ...multiplexer import multiplexer
 from ...multiplexer.base import WindowRef, canonical_window_id
-from ...topic_discovery import should_adopt_window
 from ...multiplexer.reconciliation import window_presence
 from ...session_protocol.telegram import TelegramSessionAdapter
 from ...providers import registry as provider_registry
@@ -319,15 +318,7 @@ def _recovered_window_admissible(claim: TopicProvisioning, window: WindowRef) ->
         window.window_id, owner=window.topic_mark_owner
     )
     return not quarantined and (
-        claim.kind != "topic_for_target"
-        or should_adopt_window(
-            window,
-            mode=config.topic_discovery_mode,
-            detach_pending=lifecycle_state.is_topic_detach_pending(
-                window.window_id, owner=window.topic_mark_owner
-            ),
-            quarantined=quarantined,
-        )
+        claim.kind != "topic_for_target" or lifecycle_state.window_is_adoptable(window)
     )
 
 
