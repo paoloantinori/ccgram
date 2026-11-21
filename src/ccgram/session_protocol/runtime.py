@@ -83,7 +83,7 @@ class ProtocolRuntime:
             )
 
     async def _drain_hook_event(
-        self, event: HookEvent, sessions: list[str], attempt: int, prefix: str
+        self, event: HookEvent, sessions: tuple[str, ...], attempt: int, prefix: str
     ) -> bool:
         """Observe one queued hook; returns True when the drain pass breaks.
 
