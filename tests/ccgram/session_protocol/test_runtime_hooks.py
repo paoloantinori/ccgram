@@ -345,3 +345,52 @@ async def test_permanent_failure_drops_after_bounded_retries(
             await runtime.poll("")
         assert runtime.hooks.qsize() == 0  # dropped, not requeued forever
         assert not service.requests.has_deferred(session.id)
+
+
+async def test_cancel_during_drain_is_never_swallowed(
+    service, backend, store, tmp_path, monkeypatch
+):
+    """A cancellation mid-drain must surface, not ride the except arms.
+
+    CancelledError is a BaseException, so neither the per-event
+    ``except Exception`` (task-65 drain guard) nor the poll-level arms
+    may swallow it; the requeued event keeps its deferral reservation
+    so the next poll still owes it exactly one resolve.
+    """
+    path = tmp_path / "transcript.jsonl"
+    path.touch()
+    backend.target = replace(backend.target, transcript=path)
+    session = (await service.list_sessions())[0]
+    real_observe = service.observe_hook
+    calls = {"n": 0}
+
+    async def observe_then_cancel(event, prefix):
+        calls["n"] += 1
+        if calls["n"] >= 2:
+            raise asyncio.CancelledError()
+        return await real_observe(event, prefix)
+
+    monkeypatch.setattr(service, "observe_hook", observe_then_cancel)
+    monkeypatch.setattr(
+        "ccgram.session_protocol.runtime.asyncio.sleep",
+        AsyncMock(side_effect=asyncio.CancelledError),
+    )
+    events = [
+        HookEvent(
+            "PermissionRequest", "@1", "conv", {"tool_name": "Bash"}, time.time()
+        ),
+        HookEvent(
+            "PermissionRequest", "@1", "conv", {"tool_name": "Edit"}, time.time()
+        ),
+    ]
+    with TemporaryFile() as lock:
+        runtime = ProtocolRuntime(store, service, lock)
+        for event in events:
+            runtime.observe_hook(event)
+        with pytest.raises(asyncio.CancelledError):
+            await runtime.poll("")
+        # The cancelled event is gone from the queue (cancellation skips
+        # the requeue) but its deferral reservation survives, exactly the
+        # stranded case the task-65 TTL retires once traffic stops.
+        assert runtime.hooks.qsize() == 0
+        assert service.requests.has_deferred(session.id)
