@@ -4,7 +4,12 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from typing import TYPE_CHECKING
+
 from ..multiplexer.base import canonical_window_id
+
+if TYPE_CHECKING:
+    from ..multiplexer.base import WindowRef
 from ..topic_mark_journal import TopicMarkOperation, operation_matches
 from ..topic_mark_types import TopicMarkWriteWitness
 from ..window_state_store import DEFAULT_WINDOW_ORIGIN, WINDOW_ORIGINS, window_store
@@ -44,6 +49,30 @@ def _selection_key(window_id: str) -> str:
             if canonical_window_id(key) == wanted
         ),
         window_id,
+    )
+
+
+def window_is_adoptable(window: "WindowRef") -> bool:
+    """The single admission gate for automatic topic adoption.
+
+    Closes over the configured discovery mode and the detach/quarantine
+    mark state so every call site asks the same question; the pure
+    policy stays in ``topic_discovery.should_adopt_window`` for table
+    tests.
+    """
+    # Lazy: config and the policy are only needed on admission questions.
+    from ..config import config
+    from ..topic_discovery import should_adopt_window
+
+    return should_adopt_window(
+        window,
+        mode=config.topic_discovery_mode,
+        detach_pending=is_topic_detach_pending(
+            window.window_id, owner=window.topic_mark_owner
+        ),
+        quarantined=is_topic_mark_quarantined(
+            window.window_id, owner=window.topic_mark_owner
+        ),
     )
 
 

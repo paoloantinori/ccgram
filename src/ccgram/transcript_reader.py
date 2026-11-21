@@ -1227,14 +1227,15 @@ class TranscriptReader:
 
     def _rollback_probe_observation(
         self,
-        session_id: str,
         tracked: TrackedSession,
         probe_offset: int,
         probe_boundary: "_StartupBoundary | None",
         probe_prefix: tuple[int, Any] | None,
     ) -> None:
-        """Restore what the generation probe may have moved when a
-        provider pin rejects the observation (no bytes were emitted)."""
+        """Restore what the generation probe may have moved when a read is
+        not emitted (provider pin rejection, admission refusal). The
+        restore set must cover every write the probe can make."""
+        session_id = tracked.session_id
         tracked.parsed_offset = probe_offset
         if probe_boundary is not None:
             self._startup_file_boundaries[session_id] = probe_boundary
@@ -1292,7 +1293,7 @@ class TranscriptReader:
         )
         if not identity_state.accepts_provider_observation(window_id, provider_name):
             self._rollback_probe_observation(
-                session_id, tracked, probe_offset, probe_boundary, probe_prefix
+                tracked, probe_offset, probe_boundary, probe_prefix
             )
             return
         if (
@@ -1400,6 +1401,8 @@ class TranscriptReader:
             ):
                 self.reset_parser_state(session_id)
                 self._parser_rebuild_pending.add(session_id)
+                # Boundary-only restore: the read itself committed, so the
+                # cursor stays advanced; only the startup clamp pops back.
                 if probe_boundary is not None:
                     self._startup_file_boundaries[session_id] = probe_boundary
                 new_entries = []

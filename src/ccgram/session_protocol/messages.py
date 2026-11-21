@@ -286,16 +286,17 @@ def _codex(entry: SourceEntry, state: _CodexState) -> TranscriptRecord | None:
         return None
     if kind == "message":
         role = data.get("role")
-        if role in _CHAT_ROLES:
-            if role == "assistant" or not _codex_user_context(data):
-                return _codex_message(data, key, timestamp, state)
+        if role not in _CHAT_ROLES:
+            # Non-conversation roles (system) yield no record but still end
+            # any in-flight agent stream, or the next assistant delta would
+            # merge into the pre-system message. Mirror-dedup memory
+            # (last_*) stays: a mid-turn system blob must not un-dedup the
+            # turn's own mirror.
+            state.stream_key = None
+            state.stream_text = None
             return None
-        # Non-conversation roles (system) yield no record but still end any
-        # in-flight agent stream, or the next assistant delta would merge
-        # into the pre-system message. Mirror-dedup memory (last_*) stays:
-        # a mid-turn system blob must not un-dedup the turn's own mirror.
-        state.stream_key = None
-        state.stream_text = None
+        if role == "assistant" or not _codex_user_context(data):
+            return _codex_message(data, key, timestamp, state)
         return None
     return _codex_other_item(data, key, timestamp, state)
 
@@ -567,7 +568,7 @@ def _claude_chat_kind(data: dict[str, Any]) -> str | None:
     if kind == "api-request-blob" and "payload" not in data and "source" not in data:
         message = data.get("message")
         if isinstance(message, dict) and message.get("role") in _CHAT_ROLES:
-            return str(message["role"])
+            return message["role"]
     return None
 
 
@@ -697,19 +698,21 @@ def _pi(entry: SourceEntry) -> TranscriptRecord | None:
     )
 
 
+_ANTIGRAVITY_ROLES = {
+    "user": "user",
+    "user_input": "user",
+    "user_explicit": "user",
+    "user_implicit": "user",
+    "planner_response": "assistant",
+    "model": "assistant",
+    "assistant": "assistant",
+    "info": "assistant",
+    "error": "assistant",
+}
+
+
 def _antigravity_role(data: dict[str, Any], kind: str) -> str | None:
-    role_map = {
-        "user": "user",
-        "user_input": "user",
-        "user_explicit": "user",
-        "user_implicit": "user",
-        "planner_response": "assistant",
-        "model": "assistant",
-        "assistant": "assistant",
-        "info": "assistant",
-        "error": "assistant",
-    }
-    expected = role_map.get(kind.lower())
+    expected = _ANTIGRAVITY_ROLES.get(kind.lower())
     if expected is None or data.get("role", expected) != expected:
         return None
     return expected

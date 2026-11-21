@@ -866,6 +866,9 @@ class HerdrManager:
         include_unlabeled: bool = False,
     ) -> list[WindowRef]:
         """Project one agent snapshot with best-effort live labels."""
+        # Sequential on purpose: the wire order of these calls is pinned
+        # by the public-api contract tests; gathering them reorders the
+        # socket methods.
         labels = await self._reconciliation_labels(records)
         marks = await self._topic_mark_snapshot() if records else None
         owner_counts = Counter(mark.owner for mark in marks or [])

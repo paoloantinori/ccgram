@@ -302,7 +302,11 @@ class TestFamilyRebindFlow:
         bot.create_forum_topic.assert_called_once()
         assert harness.router.chat_thread_bindings[(_USER, _CHAT, _THREAD)] == _OLD
 
-    async def test_ineligible_new_window_falls_through(self, harness) -> None:
+    async def test_ineligible_new_window_gets_no_automatic_topic(self, harness) -> None:
+        """The uniform admission checkpoint: a window the backend stamps
+        ineligible gets neither the family rebind nor a new topic (the
+        pre-merge fall-through created one; the v4.25.0 merge aligned the
+        creation path with the same admission policy)."""
         harness.bind(_OLD)
         harness.cwds[_OLD] = _CWD
         harness.providers[_OLD] = "claude"
@@ -312,8 +316,8 @@ class TestFamilyRebindFlow:
             _event(), bot, live_windows=[_ref(_NEW, eligible=False)]
         )
 
-        assert adopted is True
-        bot.create_forum_topic.assert_called_once()
+        assert adopted is False
+        bot.create_forum_topic.assert_not_called()
         assert harness.router.chat_thread_bindings[(_USER, _CHAT, _THREAD)] == _OLD
 
     async def test_unconfirmed_listing_answers_false(self, harness) -> None:

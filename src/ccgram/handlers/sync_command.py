@@ -40,7 +40,6 @@ from ..telegram_client import PTBTelegramClient, TelegramClient
 from ..thread_router import thread_router
 from ..multiplexer import multiplexer as tmux_manager
 from ..multiplexer.reconciliation import list_windows_for_reconciliation
-from ..topic_discovery import should_adopt_window
 from ..window_state_ports import lifecycle_state
 from ..user_preferences import user_preferences
 from .callback_data import CB_SYNC_DISMISS, CB_SYNC_FIX
@@ -110,18 +109,7 @@ async def _run_audit() -> AuditResult | None:
     live_ids = {w.window_id for w in all_windows}
     live_pairs = [(w.window_id, w.window_name) for w in all_windows]
     adoptable = {
-        w.window_id
-        for w in all_windows
-        if should_adopt_window(
-            w,
-            mode=config.topic_discovery_mode,
-            detach_pending=lifecycle_state.is_topic_detach_pending(
-                w.window_id, owner=w.topic_mark_owner
-            ),
-            quarantined=lifecycle_state.is_topic_mark_quarantined(
-                w.window_id, owner=w.topic_mark_owner
-            ),
-        )
+        w.window_id for w in all_windows if lifecycle_state.window_is_adoptable(w)
     }
     audit = session_manager.audit_state(live_ids, live_pairs, adoptable)
     audit.issues.extend(
@@ -448,7 +436,10 @@ async def _adopt_orphaned_windows(
     from .topics.topic_orchestration import handle_new_window as _handle_new_window
 
     # Lazy: same bidirectional cycle as handle_new_window above.
-    from .topics.topic_orchestration import confirmed_adoption_listing
+    from .topics.topic_orchestration import (
+        confirmed_adoption_listing,
+        find_adoptable_window,
+    )
 
     for issue in issues:
         if issue.category != "orphaned_window":
@@ -460,20 +451,10 @@ async def _adopt_orphaned_windows(
         listing = await confirmed_adoption_listing(window_id)
         if listing is None:
             continue
-        # Marked-mode parity: automatic adoption honors the same admission
-        # rules as discovery, so an unmarked window is not adoptable in
-        # marked mode even though it is live and eligible.
-        ref = next((w for w in listing if w.matches(window_id)), None)
-        if ref is None or not should_adopt_window(
-            ref,
-            mode=config.topic_discovery_mode,
-            detach_pending=lifecycle_state.is_topic_detach_pending(
-                ref.window_id, owner=ref.topic_mark_owner
-            ),
-            quarantined=lifecycle_state.is_topic_mark_quarantined(
-                ref.window_id, owner=ref.topic_mark_owner
-            ),
-        ):
+        # Marked-mode prefilter over the confirmed listing we already
+        # hold; handle_new_window re-checks at its own checkpoint, this
+        # only avoids the deeper call for windows admission would refuse.
+        if find_adoptable_window(listing, window_id) is None:
             continue
         view = window_query.view_window(window_id)
         name = (view.window_name if view else "") or thread_router.get_display_name(
@@ -594,18 +575,7 @@ async def handle_sync_fix(
     # the backend's verdict. The live set stays complete: it drives the pruning
     # below, and narrowing it would make a live excluded binding a fixable ghost.
     adoptable_ids = {
-        w.window_id
-        for w in all_windows
-        if should_adopt_window(
-            w,
-            mode=config.topic_discovery_mode,
-            detach_pending=lifecycle_state.is_topic_detach_pending(
-                w.window_id, owner=w.topic_mark_owner
-            ),
-            quarantined=lifecycle_state.is_topic_mark_quarantined(
-                w.window_id, owner=w.topic_mark_owner
-            ),
-        )
+        w.window_id for w in all_windows if lifecycle_state.window_is_adoptable(w)
     }
 
     # Audit before fixing to count fixable issues

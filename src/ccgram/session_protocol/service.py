@@ -76,6 +76,20 @@ class SessionService(Protocol):
     ) -> tuple[ActionResult, int]: ...
 
 
+def raise_if_cancelling() -> None:
+    """Re-raise the error being handled when the task was asked to stop.
+
+    A cancel can surface as another exception, such as a failure while a
+    worker unwinds. Swallowing it would leave the cancel request consumed
+    and the loop running. The bare raise re-raises the in-flight
+    exception (sys.exc_info is still bound in a callee during handling),
+    so the original error, not a fresh CancelledError, propagates.
+    """
+    task = asyncio.current_task()
+    if task is not None and task.cancelling():
+        raise
+
+
 class LocalSessionService:
     def __init__(
         self,
@@ -116,11 +130,7 @@ class LocalSessionService:
                 try:
                     _, snapshot = await self._update(target)
                 except Exception:
-                    # Cancellation is not an Exception, but an error raised while
-                    # the task is being cancelled is part of the shutdown: propagate it.
-                    current = asyncio.current_task()
-                    if current is not None and current.cancelling():
-                        raise
+                    raise_if_cancelling()
                     # One target's unexpected failure must not stop the others.
                     # Its sessions stay live, so they are not reported as removed.
                     logger.exception("Session protocol target %s failed", target.id)

@@ -54,7 +54,6 @@ from .multiplexer import multiplexer as tmux_manager
 from .multiplexer.base import WindowRef, canonical_window_id
 from .multiplexer.reconciliation import list_windows_for_reconciliation
 from .multiplexer.window_liveness import note_live_windows
-from .topic_discovery import should_adopt_window
 from .monitor_events import NewMessage, NewWindowEvent, SessionInfo
 from .transcript_reader import (
     TrackingEntry,
@@ -1114,16 +1113,7 @@ class SessionMonitor:
                 continue
             if window_key in bound_lookup:
                 continue
-            if not should_adopt_window(
-                window,
-                mode=config.topic_discovery_mode,
-                detach_pending=lifecycle_state.is_topic_detach_pending(
-                    window.window_id, owner=window.topic_mark_owner
-                ),
-                quarantined=lifecycle_state.is_topic_mark_quarantined(
-                    window.window_id, owner=window.topic_mark_owner
-                ),
-            ):
+            if not lifecycle_state.window_is_adoptable(window):
                 continue
             event = NewWindowEvent(
                 window_id=window.window_id,
@@ -1280,16 +1270,7 @@ class SessionMonitor:
                     else {
                         w.window_id
                         for w in all_windows
-                        if should_adopt_window(
-                            w,
-                            mode=config.topic_discovery_mode,
-                            detach_pending=lifecycle_state.is_topic_detach_pending(
-                                w.window_id, owner=w.topic_mark_owner
-                            ),
-                            quarantined=lifecycle_state.is_topic_mark_quarantined(
-                                w.window_id, owner=w.topic_mark_owner
-                            ),
-                        )
+                        if lifecycle_state.window_is_adoptable(w)
                     }
                 )
                 if all_windows is None:

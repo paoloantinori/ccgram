@@ -1929,6 +1929,9 @@ class TestMarkedSyncDiscovery:
     ):
         sm, _, _, _, mux, cfg = _patch_deps
         cfg.topic_discovery_mode = "marked"
+        from ccgram.config import config
+
+        monkeypatch.setattr(config, "topic_discovery_mode", "marked")
         mux.list_windows_for_reconciliation.return_value = self.windows()
         monkeypatch.setattr(
             "ccgram.handlers.sync_command.lifecycle_state.is_topic_detach_pending",

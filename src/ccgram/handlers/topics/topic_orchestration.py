@@ -36,7 +36,6 @@ from ...thread_router import TopicProvisioning, thread_router
 from ...multiplexer import multiplexer as tmux_manager
 from ...multiplexer.base import WindowRef, canonical_window_id
 from .family_rebind import maybe_rebind_family_topic
-from ...topic_discovery import should_adopt_window
 from ...window_state_ports import lifecycle_state
 
 logger = structlog.get_logger()
@@ -873,6 +872,7 @@ async def create_topic_in_chat(  # noqa: C901
     claim_id: str | None = None,
     propagate_retry_after: bool = False,
     automatic: bool = False,
+    admission_windows: Sequence[WindowRef] | None = None,
 ) -> bool:
     """Create and bind one topic under the caller's window creation lock.
 
@@ -928,6 +928,7 @@ async def create_topic_in_chat(  # noqa: C901
             window_id,
             expected_owner=existing_claim.topic_mark_owner if existing_claim else None,
             claim_id=existing_claim.claim_id if existing_claim else None,
+            windows=admission_windows,
         )
         if automatic
         else None
@@ -1128,6 +1129,18 @@ async def _handle_new_window_locked(
 
     topic_name = _default_topic_name(event)
 
+    # One admission checkpoint for every automatic path: the rebind and
+    # the creation below must answer to the same marked-mode policy, so
+    # an unmarked window cannot take a dead family topic either. Targeted
+    # callers explicitly want a topic and skip the check.
+    if (
+        target_user_id is None
+        and target_chat_id is None
+        and live_windows is not None
+        and find_adoptable_window(live_windows, event.window_id) is None
+    ):
+        return False
+
     # Automatic adoption only: a targeted caller explicitly wants a new
     # topic in a chosen chat and must not have it stolen.
     if (
@@ -1157,6 +1170,7 @@ async def _handle_new_window_locked(
                 topic_name,
                 user_id=target_user_id,
                 automatic=target_user_id is None,
+                admission_windows=live_windows,
             )
         )
     return any(results)
@@ -1202,40 +1216,39 @@ async def still_adoptable(window_id: str) -> bool:
     return await _adoptable_window(window_id) is not None
 
 
-async def _adoptable_window(window_id: str) -> WindowRef | None:
-    """Confirm, right now, that discovery may adopt this window (marked mode).
+def find_adoptable_window(
+    windows: Sequence[WindowRef], window_id: str
+) -> WindowRef | None:
+    """The admission-verdict match over an already-confirmed listing.
 
-    Shares the confirmed-listing contract of ``confirmed_adoption_listing``
-    but answers the single window and applies the marked-topics admission
-    rules, so automatic adoption honors topic marks and quarantine state.
+    Pure: callers that hold a confirmed listing (the caller-supplied
+    liveness truth) ask this instead of re-fetching, so eligibility and
+    the adoption decision cannot diverge over a second fetch.
     """
-    # Lazy: importing the reconciliation seam at module load forms a cycle.
-    from ...multiplexer.reconciliation import list_windows_for_reconciliation
-
-    windows = await list_windows_for_reconciliation(tmux_manager)
-    if windows is None:
-        logger.warning(
-            "Skipping adoption: no confirmed window listing", window_id=window_id
-        )
-        return None
-    window = next(
+    return next(
         (
             w
             for w in windows
-            if w.matches(window_id)
-            and should_adopt_window(
-                w,
-                mode=config.topic_discovery_mode,
-                detach_pending=lifecycle_state.is_topic_detach_pending(
-                    w.window_id, owner=w.topic_mark_owner
-                ),
-                quarantined=lifecycle_state.is_topic_mark_quarantined(
-                    w.window_id, owner=w.topic_mark_owner
-                ),
-            )
+            if w.matches(window_id) and lifecycle_state.window_is_adoptable(w)
         ),
         None,
     )
+
+
+async def _adoptable_window(
+    window_id: str, *, windows: Sequence[WindowRef] | None = None
+) -> WindowRef | None:
+    """Confirm, right now, that discovery may adopt this window (marked mode).
+
+    Delegates the confirmed listing to ``confirmed_adoption_listing``
+    (liveness truth, skip logs) unless the caller already holds one, then
+    applies the marked-topics admission rules to the single window.
+    """
+    if windows is None:
+        windows = await confirmed_adoption_listing(window_id)
+        if windows is None:
+            return None
+    window = find_adoptable_window(windows, window_id)
     if window is None:
         logger.info(
             "Skipping adoption: window no longer adoptable", window_id=window_id
@@ -1262,9 +1275,10 @@ async def _record_automatic_admission(
     *,
     expected_owner: str | None = None,
     claim_id: str | None = None,
+    windows: Sequence[WindowRef] | None = None,
 ) -> WindowRef | None:
     """Capture verified ownership before admitting a target, never mark it."""
-    window = await _adoptable_window(window_id)
+    window = await _adoptable_window(window_id, windows=windows)
     if window is None:
         return None
     if _owner_has_topic_provisioning(
@@ -1304,18 +1318,7 @@ async def adopt_unbound_windows(client: TelegramClient) -> None:
     live_ids = {w.window_id for w in all_windows}
     live_pairs = [(w.window_id, w.window_name) for w in all_windows]
     adoptable_ids = {
-        w.window_id
-        for w in all_windows
-        if should_adopt_window(
-            w,
-            mode=config.topic_discovery_mode,
-            detach_pending=lifecycle_state.is_topic_detach_pending(
-                w.window_id, owner=w.topic_mark_owner
-            ),
-            quarantined=lifecycle_state.is_topic_mark_quarantined(
-                w.window_id, owner=w.topic_mark_owner
-            ),
-        )
+        w.window_id for w in all_windows if lifecycle_state.window_is_adoptable(w)
     }
     audit = session_manager.audit_state(live_ids, live_pairs, adoptable_ids)
     orphaned = [i for i in audit.issues if i.category == "orphaned_window"]
