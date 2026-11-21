@@ -25,7 +25,12 @@ Manual form, if the script is unreachable:
   `/Library/LaunchDaemons/com.user.ccgram` (the gui LaunchAgent is disabled): the deploy script's restart-verify targets the wrong
   service, so after `--mac` restart manually with `kill $(pgrep -f "ccgram run")` (the daemon respawns it), then verify "extension
   loaded" on `~/Library/Logs/ccgram.log`. Log timestamps are UTC and date-stamped since fork/main 8f1e01c5 (2026-11-09); +1h versus
-  winter CET, +2h summer CEST.
+  winter CET, +2h summer CEST. The deploy script's --mac path pulls origin/fork/main, so PUSH first: the Mac ships the pushed
+  state, not bird's local commits (2026-11-09: deployed before pushing; the Mac silently stayed 6 commits behind for 12 days).
+  After a --mac deploy, compare the "Starting ccgram" version line on both bridges; a mismatch means the push was missed.
+
+Both bridges run `CCGRAM_AUTODELETE_DEAD_TOPICS=true` since 2026-11-21 (maintainer request: dead topics purge themselves;
+reopens create a new topic). Topics auto-deleting is deliberate, NOT the port-4.6 autoclose regression.
 
 ## Topic naming contract
 
