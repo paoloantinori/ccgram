@@ -60,8 +60,10 @@ def window_is_adoptable(window: "WindowRef") -> bool:
     policy stays in ``topic_discovery.should_adopt_window`` for table
     tests.
     """
-    # Lazy: config and the policy are only needed on admission questions.
+    # Lazy: config is only needed on admission questions.
     from ..config import config
+
+    # Lazy: the pure policy is only needed on this path.
     from ..topic_discovery import should_adopt_window
 
     return should_adopt_window(
