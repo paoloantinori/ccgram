@@ -1242,6 +1242,31 @@ class TranscriptReader:
         if probe_prefix is not None:
             self._file_prefixes[session_id] = probe_prefix
 
+    def _rotate_generation_or_rewind(
+        self,
+        session_id: str,
+        tracked: TrackedSession,
+        *,
+        stable_read_start: int,
+        generation_changed: bool,
+        reset_during_read: bool,
+    ) -> bool:
+        """Rotate the source generation, rewinding the cycle on failure.
+
+        A replace-clamped read may already sit at EOF; if the generation
+        cannot be persisted the cycle's entries were never emitted and
+        would be lost forever, so rewind like every other failed exit and
+        retry next poll.
+        """
+        if not (generation_changed or reset_during_read):
+            return True
+        try:
+            self._rotate_source_generation(tracked)
+        except OSError:
+            self._rollback_read(session_id, tracked, stable_read_start)
+            return False
+        return True
+
     async def _process_session_file(
         self,
         session_id: str,
@@ -1344,8 +1369,14 @@ class TranscriptReader:
         ):
             return
         new_entries, _, reset_during_read, _ = stable_read
-        if generation_changed or reset_during_read:
-            self._rotate_source_generation(tracked)
+        if not self._rotate_generation_or_rewind(
+            session_id,
+            tracked,
+            stable_read_start=stable_read.start_cursor,
+            generation_changed=generation_changed,
+            reset_during_read=reset_during_read,
+        ):
+            return
         committed = await self._commit_stable_read(
             session_id,
             tracked,
@@ -1401,8 +1432,10 @@ class TranscriptReader:
             ):
                 self.reset_parser_state(session_id)
                 self._parser_rebuild_pending.add(session_id)
-                # Boundary-only restore: the read itself committed, so the
-                # cursor stays advanced; only the startup clamp pops back.
+                # Boundary-only restore: _admit_read already rolled the
+                # cursor back to stable_read.start_cursor (the read is not
+                # emitted, so it re-reads under the new provider next
+                # poll); only the startup-boundary clamp pops back here.
                 if probe_boundary is not None:
                     self._startup_file_boundaries[session_id] = probe_boundary
                 new_entries = []

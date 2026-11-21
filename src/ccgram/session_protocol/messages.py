@@ -565,7 +565,17 @@ def _claude_chat_kind(data: dict[str, Any]) -> str | None:
     kind = data.get("type")
     if kind in _CHAT_ROLES:
         return kind
-    if kind == "api-request-blob" and "payload" not in data and "source" not in data:
+    # Positive discriminator, fail closed: the zai variant writes real chat
+    # turns as bare api-request-blob rows carrying the claude transcript
+    # identity keys (uuid; timestamp too). Upstream's diagnostic envelopes
+    # never carry uuid, with or without their payload/source wrapper, so
+    # only the zai shape is admitted and every other blob stays internal.
+    if (
+        kind == "api-request-blob"
+        and "uuid" in data
+        and "payload" not in data
+        and "source" not in data
+    ):
         message = data.get("message")
         if isinstance(message, dict) and message.get("role") in _CHAT_ROLES:
             return message["role"]
