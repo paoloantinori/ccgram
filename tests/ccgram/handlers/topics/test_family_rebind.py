@@ -129,6 +129,13 @@ class _Harness:
             "ccgram.handlers.topics.topic_orchestration._auto_detect_provider",
             AsyncMock(),
         )
+        # Upstream's admission gate inside create_topic_in_chat does a live
+        # reconciliation listing; these tests exercise the fork's rebind
+        # logic, so admission is stubbed to the plain eligible ref.
+        monkeypatch.setattr(
+            "ccgram.handlers.topics.topic_orchestration._record_automatic_admission",
+            AsyncMock(return_value=_ref(_NEW)),
+        )
 
     def bind(self, window_id: str, *, user_id: int = _USER, thread_id: int = _THREAD):
         self.router.bind_thread(user_id, thread_id, window_id, chat_id=_CHAT)

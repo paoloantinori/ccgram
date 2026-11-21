@@ -1,14 +1,18 @@
 """Tests for transcript reader offset handling."""
 
+import json
 import os
-import time
+import threading
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
+
+import pytest
 
 from ccgram import transcript_reader
 from ccgram.idle_tracker import IdleTracker
 from ccgram.monitor_state import BacklogSkipIntent, MonitorState, TrackedSession
-from ccgram.transcript_reader import TranscriptReader, _StableRead
+from ccgram.transcript_reader import TranscriptReader, _StableRead, _StartupBoundary
 
 
 def test_clear_session_cancels_pending_skip_barrier(tmp_path) -> None:
@@ -240,7 +244,7 @@ async def test_whole_file_rewrite_bypasses_unchanged_mtime(tmp_path) -> None:
     reader = TranscriptReader(state, IdleTracker())
     provider = SimpleNamespace(
         capabilities=SimpleNamespace(
-            name="gemini",
+            name="whole-document",
             supports_incremental_read=False,
             supports_task_tracking=False,
         )
@@ -254,7 +258,7 @@ async def test_whole_file_rewrite_bypasses_unchanged_mtime(tmp_path) -> None:
             "_read_session_entries",
             new=AsyncMock(
                 side_effect=lambda *_args, **_kwargs: _StableRead(
-                    [], session_file.stat(), False
+                    [], session_file.stat(), False, 0
                 )
             ),
         ) as read,
@@ -280,7 +284,7 @@ async def test_whole_file_replacement_bypasses_unchanged_mtime(tmp_path) -> None
     reader = TranscriptReader(state, IdleTracker())
     provider = SimpleNamespace(
         capabilities=SimpleNamespace(
-            name="gemini",
+            name="whole-document",
             supports_incremental_read=False,
             supports_task_tracking=False,
         )
@@ -298,6 +302,7 @@ async def test_whole_file_replacement_bypasses_unchanged_mtime(tmp_path) -> None
                     [],
                     session_file.stat(),
                     False,
+                    0,
                 )
             ),
         ) as read,
@@ -494,684 +499,1027 @@ async def test_replaced_smaller_transcript_resumes_from_eof_no_replay(
     assert tracked.parsed_offset == session_file.stat().st_size
 
 
-_CLAUDE_PROVIDER = SimpleNamespace(
-    capabilities=SimpleNamespace(
-        name="claude",
-        supports_incremental_read=True,
-        supports_task_tracking=False,
+class TestStartupReplayBound:
+    """A restart must not re-send an unbounded undelivered backlog.
+
+    The delivered watermark only advances when the queue fully drains, so a
+    wedged or flood-limited queue leaves it far behind. Replaying that range
+    re-sends thousands of messages and trips Telegram flood control again.
+    """
+
+    @staticmethod
+    def _record(text: str) -> str:
+        return f'{{"type":"assistant","message":{{"content":[{{"type":"text","text":"{text}"}}]}}}}\n'
+
+    def _reader(self, tmp_path, backlog: int, *, watermark: int = 0):
+        session_file = tmp_path / "transcript.jsonl"
+        session_file.write_text(
+            "".join(self._record(f"m{i}") for i in range(backlog)), newline="\n"
+        )
+        state = MonitorState(state_file=tmp_path / "monitor_state.json")
+        state.update_session(
+            TrackedSession(
+                session_id="sess",
+                file_path=str(session_file),
+                last_byte_offset=watermark,
+            )
+        )
+        return TranscriptReader(state, IdleTracker()), state, session_file
+
+    async def test_backlog_larger_than_the_bound_is_skipped(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        from ccgram.config import config
+
+        monkeypatch.setattr(config, "startup_replay_max_bytes", 120, raising=False)
+        reader, state, session_file = self._reader(tmp_path, backlog=10)
+
+        messages: list = []
+        await reader._process_session_file(
+            "sess", session_file, messages, window_id="@1"
+        )
+
+        assert messages == []
+        tracked = state.get_session("sess")
+        assert tracked is not None
+        assert tracked.parsed_offset == session_file.stat().st_size
+
+    async def test_backlog_within_the_bound_still_replays(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        from ccgram.config import config
+
+        monkeypatch.setattr(config, "startup_replay_max_bytes", 1 << 20, raising=False)
+        reader, _state, session_file = self._reader(tmp_path, backlog=3)
+
+        messages: list = []
+        await reader._process_session_file(
+            "sess", session_file, messages, window_id="@1"
+        )
+
+        assert [msg.text for msg in messages] == ["m0", "m1", "m2"]
+
+    async def test_zero_limit_replays_everything(self, tmp_path, monkeypatch) -> None:
+        from ccgram.config import config
+
+        monkeypatch.setattr(config, "startup_replay_max_bytes", 0, raising=False)
+        reader, _state, session_file = self._reader(tmp_path, backlog=10)
+
+        messages: list = []
+        await reader._process_session_file(
+            "sess", session_file, messages, window_id="@1"
+        )
+
+        assert len(messages) == 10
+
+    async def test_only_the_first_poll_is_bounded(self, tmp_path, monkeypatch) -> None:
+        from ccgram.config import config
+
+        monkeypatch.setattr(config, "startup_replay_max_bytes", 120, raising=False)
+        reader, _state, session_file = self._reader(tmp_path, backlog=10)
+
+        skipped: list = []
+        await reader._process_session_file(
+            "sess", session_file, skipped, window_id="@1"
+        )
+        assert skipped == []
+
+        with session_file.open("a") as transcript:
+            transcript.write(self._record("fresh"))
+
+        fresh: list = []
+        await reader._process_session_file("sess", session_file, fresh, window_id="@1")
+
+        assert [msg.text for msg in fresh] == ["fresh"]
+
+    async def test_a_cleared_session_id_that_returns_is_not_clamped(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        """A cleared id that comes back is a new session, not the old backlog (#367)."""
+        from ccgram.config import config
+
+        monkeypatch.setattr(config, "startup_replay_max_bytes", 120, raising=False)
+        reader, state, session_file = self._reader(tmp_path, backlog=10)
+
+        reader.clear_session("sess")
+        state.update_session(
+            TrackedSession(session_id="sess", file_path=str(session_file))
+        )
+
+        returned: list = []
+        await reader._process_session_file(
+            "sess", session_file, returned, window_id="@1"
+        )
+
+        assert len(returned) == 10
+
+    async def test_a_session_tracked_after_startup_is_never_clamped(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        """A session first tracked by this process has no pre-restart backlog."""
+        from ccgram.config import config
+
+        monkeypatch.setattr(config, "startup_replay_max_bytes", 120, raising=False)
+        session_file = tmp_path / "fresh.jsonl"
+        session_file.write_text(
+            "".join(self._record(f"m{i}") for i in range(10)), newline="\n"
+        )
+        state = MonitorState(state_file=tmp_path / "monitor_state.json")
+        reader = TranscriptReader(state, IdleTracker())
+        # Tracked at offset 0 by a replay request during this process.
+        state.update_session(
+            TrackedSession(session_id="fresh", file_path=str(session_file))
+        )
+
+        messages: list = []
+        await reader._process_session_file(
+            "fresh", session_file, messages, window_id="@1"
+        )
+
+        assert [msg.text for msg in messages] == [f"m{i}" for i in range(10)]
+
+    async def test_an_explicit_replay_request_is_never_clamped(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        from ccgram.config import config
+
+        monkeypatch.setattr(config, "startup_replay_max_bytes", 120, raising=False)
+        reader, _state, session_file = self._reader(tmp_path, backlog=10)
+        reader.allow_replay("sess")
+
+        messages: list = []
+        await reader._process_session_file(
+            "sess", session_file, messages, window_id="@1"
+        )
+
+        assert len(messages) == 10
+
+    async def test_a_rebuild_failure_does_not_replay_a_clamped_backlog(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        """A rollback after clamping must re-clamp, not fall back to the watermark."""
+        from unittest.mock import AsyncMock, patch
+
+        from ccgram.config import config
+
+        monkeypatch.setattr(config, "startup_replay_max_bytes", 120, raising=False)
+        reader, state, session_file = self._reader(tmp_path, backlog=10)
+        skipped: list = []
+        await reader._process_session_file(
+            "sess", session_file, skipped, window_id="@1"
+        )
+        assert skipped == []
+
+        with session_file.open("a") as transcript:
+            transcript.write(self._record("live"))
+
+        # Force the parser-rebuild path and make it fail.
+        reader._parser_rebuild_pending.add("sess")
+        with patch.object(
+            reader,
+            "_rebuild_committed_parser_context",
+            AsyncMock(return_value=False),
+        ):
+            blocked: list = []
+            await reader._process_session_file(
+                "sess", session_file, blocked, window_id="@1"
+            )
+
+        tracked = state.get_session("sess")
+        assert tracked is not None
+        assert tracked.parsed_offset >= reader._startup_clamped["sess"]
+
+        # The live record written after the clamp is still delivered.
+        delivered: list = []
+        await reader._process_session_file(
+            "sess", session_file, delivered, window_id="@1"
+        )
+        assert [msg.text for msg in delivered] == ["live"]
+
+    async def test_canceling_a_skip_cannot_undo_the_clamp(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        """A canceled backlog skip must not reopen the clamped range."""
+        from ccgram.config import config
+
+        monkeypatch.setattr(config, "startup_replay_max_bytes", 120, raising=False)
+        reader, state, session_file = self._reader_with_backlog(tmp_path)
+        messages: list = []
+        await reader._process_session_file(
+            "sess", session_file, messages, window_id="@1"
+        )
+
+        assert messages == []
+        assert "sess" in reader._startup_clamped
+
+        reader.replay_from_watermark("sess")
+
+        tracked = state.get_session("sess")
+        assert tracked is not None
+        assert tracked.parsed_offset >= reader._startup_clamped["sess"]
+
+    async def test_a_refreshed_session_id_keeps_the_clamp(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        """The same transcript under a new id must not replay its backlog."""
+        from ccgram.config import config
+
+        monkeypatch.setattr(config, "startup_replay_max_bytes", 120, raising=False)
+        reader, _state, session_file = self._reader_with_backlog(tmp_path)
+        await reader._process_session_file("sess", session_file, [], window_id="@1")
+        clamped = reader._startup_clamped.get("sess")
+        assert clamped is not None
+
+        tracked = reader._adopt_tracking_for_file("refreshed", session_file)
+
+        assert tracked is not None
+        assert reader._startup_clamped.get("refreshed") == clamped
+        assert "refreshed" in reader._startup_sessions
+        # The replacement cursor starts at -1, which falls back to the delivered
+        # watermark and would replay the clamped range.
+        assert tracked.parsed_offset >= clamped
+
+        replayed: list = []
+        await reader._process_session_file(
+            "refreshed", session_file, replayed, window_id="@1"
+        )
+        assert replayed == []
+
+    def _reader_with_backlog(self, tmp_path):
+        session_file = tmp_path / "transcript.jsonl"
+        session_file.write_text(
+            "".join(self._record(f"m{i}") for i in range(10)), newline="\n"
+        )
+        state = MonitorState(state_file=tmp_path / "monitor_state.json")
+        state.update_session(
+            TrackedSession(session_id="sess", file_path=str(session_file))
+        )
+        return TranscriptReader(state, IdleTracker()), state, session_file
+
+    async def test_the_parser_rebuild_reads_up_to_the_clamp_point(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        """A rebuild bounded by the watermark would miss the skipped turn."""
+        from ccgram import transcript_reader as module
+        from ccgram.config import config
+
+        monkeypatch.setattr(config, "startup_replay_max_bytes", 120, raising=False)
+        reader, state, session_file = self._reader_with_backlog(tmp_path)
+        await reader._process_session_file("sess", session_file, [], window_id="@1")
+        tracked = state.get_session("sess")
+        assert tracked is not None
+        clamp = reader._startup_clamped["sess"]
+        watermark = tracked.last_byte_offset
+
+        seen: list[int] = []
+        real_parse = module.parse_records
+
+        def spy(entries, provider_name, parser_state, **kwargs):
+            seen.extend(entry.offset for entry in entries)
+            return real_parse(entries, provider_name, parser_state, **kwargs)
+
+        reader._parser_rebuild_pending.add("sess")
+        with session_file.open("a") as transcript:
+            transcript.write(self._record("live"))
+        monkeypatch.setattr(module, "parse_records", spy)
+        await reader._process_session_file("sess", session_file, [], window_id="@1")
+
+        assert seen, "rebuild did not parse anything"
+        assert max(seen) <= clamp
+        if watermark < clamp:
+            # Bounded by the watermark, the rebuild would stop before the clamp.
+            assert max(seen) > watermark
+
+    async def test_a_refresh_before_the_first_poll_still_bounds_the_replay(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        """The refresh case that the poll-then-refresh test cannot reach."""
+        from ccgram.config import config
+
+        monkeypatch.setattr(config, "startup_replay_max_bytes", 120, raising=False)
+        session_file = tmp_path / "transcript.jsonl"
+        session_file.write_text(
+            "".join(self._record(f"m{i}") for i in range(10)), newline="\n"
+        )
+        state = MonitorState(state_file=tmp_path / "monitor_state.json")
+        state.update_session(
+            TrackedSession(session_id="old", file_path=str(session_file))
+        )
+        reader = TranscriptReader(state, IdleTracker())
+
+        # Refresh the id before any poll clamped the old one.
+        tracked = reader._adopt_tracking_for_file("new", session_file)
+        assert tracked is not None
+        assert "new" in reader._startup_sessions
+
+        messages: list = []
+        await reader._process_session_file(
+            "new", session_file, messages, window_id="@1"
+        )
+
+        assert messages == []
+        assert "new" in reader._startup_clamped
+
+    async def test_a_refresh_moves_startup_state_to_the_new_id(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        """The old id must not leak startup state; the replay exemption follows."""
+        from ccgram.config import config
+
+        monkeypatch.setattr(config, "startup_replay_max_bytes", 120, raising=False)
+        reader, _state, session_file = self._reader_with_backlog(tmp_path)
+        reader.allow_replay("sess")
+        await reader._process_session_file("sess", session_file, [], window_id="@1")
+        assert "sess" in reader._startup_replay_checked
+
+        assert reader._adopt_tracking_for_file("refreshed", session_file) is not None
+
+        assert "sess" not in reader._startup_sessions
+        assert "sess" not in reader._startup_replay_checked
+        assert "sess" not in reader._replay_allowed
+        assert "refreshed" in reader._replay_allowed
+
+    async def test_an_explicit_replay_request_survives_a_refresh(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        from ccgram.config import config
+
+        monkeypatch.setattr(config, "startup_replay_max_bytes", 120, raising=False)
+        reader, _state, session_file = self._reader_with_backlog(tmp_path)
+        reader.allow_replay("sess")
+        assert reader._adopt_tracking_for_file("refreshed", session_file) is not None
+
+        messages: list = []
+        await reader._process_session_file(
+            "refreshed", session_file, messages, window_id="@1"
+        )
+
+        assert len(messages) == 10
+        assert "refreshed" not in reader._startup_clamped
+
+
+def _record(text: str) -> str:
+    return (
+        '{"type":"assistant","message":{"content":[{"type":"text","text":"%s"}]}}\n'
+        % text
     )
-)
 
 
-async def test_consecutive_appends_skip_prefix_digest(tmp_path) -> None:
-    """Growing transcripts must not pay a full-file digest every poll cycle."""
-    history = (
-        '{"type":"assistant","message":{"content":[{"type":"text","text":"h0"}]}}\n'
-    )
-    session_file = tmp_path / "transcript.jsonl"
-    session_file.write_text(history, newline="\n")
-
+def _tracked_reader(tmp_path, session_file, offset):
     state = MonitorState(state_file=tmp_path / "monitor_state.json")
     state.update_session(
         TrackedSession(
-            session_id="sess",
-            file_path=str(session_file),
-            last_byte_offset=len(history.encode()),
+            session_id="sess", file_path=str(session_file), last_byte_offset=offset
         )
     )
-    reader = TranscriptReader(state, IdleTracker())
-    real_digest = transcript_reader._prefix_digest
+    return TranscriptReader(state, IdleTracker()), state
 
-    delivered = []
-    with (
-        patch(
-            "ccgram.transcript_reader._resolve_provider_for_file",
-            return_value=_CLAUDE_PROVIDER,
-        ),
-        patch("ccgram.transcript_reader._prefix_digest", wraps=real_digest) as digest,
-    ):
-        for index in range(4):
-            line = (
-                '{"type":"assistant","message":{"content":[{"type":"text","text":"m%d"}]}}\n'
-                % index
-            )
-            with session_file.open("a") as transcript:
-                transcript.write(line)
-            messages = []
+
+class TestSteadyStateCost:
+    """Polling a growing transcript must not hash the consumed prefix."""
+
+    async def test_appends_and_idle_polls_never_digest_the_prefix(
+        self, tmp_path
+    ) -> None:
+        history = _record("h0") * 50
+        session_file = tmp_path / "transcript.jsonl"
+        session_file.write_text(history)
+        reader, _ = _tracked_reader(tmp_path, session_file, len(history.encode()))
+        hashed = 0
+        real_range = transcript_reader._hash_range
+
+        def counting_range(digest, path, start, end):
+            nonlocal hashed
+            hashed += end - start
+            return real_range(digest, path, start, end)
+
+        delivered: list[str] = []
+        appended = 0
+        with (
+            patch(
+                "ccgram.transcript_reader._prefix_digest",
+                wraps=transcript_reader._prefix_digest,
+            ) as full_digest,
+            patch("ccgram.transcript_reader._hash_range", counting_range),
+        ):
+            await reader._process_session_file("sess", session_file, [], window_id="@1")
+            hashed = 0
+            for index in range(5):
+                line = _record(f"m{index}")
+                with session_file.open("a") as transcript:
+                    transcript.write(line)
+                appended += len(line.encode())
+                messages: list = []
+                await reader._process_session_file(
+                    "sess", session_file, messages, window_id="@1"
+                )
+                delivered.extend(msg.text for msg in messages)
+                await reader._process_session_file(
+                    "sess", session_file, [], window_id="@1"
+                )
+
+        assert delivered == [f"m{index}" for index in range(5)]
+        assert full_digest.call_count == 0
+        assert hashed == appended
+
+    async def test_metadata_only_change_on_idle_file_is_inspected_once(
+        self, tmp_path
+    ) -> None:
+        history = _record("h0") * 5
+        session_file = tmp_path / "transcript.jsonl"
+        session_file.write_text(history)
+        reader, _ = _tracked_reader(tmp_path, session_file, len(history.encode()))
+        await reader._process_session_file("sess", session_file, [], window_id="@1")
+        os.chmod(session_file, 0o600)
+        os.chmod(session_file, 0o644)
+
+        with (
+            patch(
+                "ccgram.transcript_reader._prefix_digest",
+                wraps=transcript_reader._prefix_digest,
+            ) as full_digest,
+            patch.object(
+                reader, "_marker_changed", wraps=reader._marker_changed
+            ) as marker,
+        ):
+            for _ in range(4):
+                await reader._process_session_file(
+                    "sess", session_file, [], window_id="@1"
+                )
+
+        assert full_digest.call_count == 0
+        assert marker.call_count <= 1
+
+    async def test_inode_change_with_intact_bytes_digests_once_and_delivers(
+        self, tmp_path
+    ) -> None:
+        history = _record("h0") * 5
+        session_file = tmp_path / "transcript.jsonl"
+        session_file.write_text(history)
+        reader, _ = _tracked_reader(tmp_path, session_file, len(history.encode()))
+        await reader._process_session_file("sess", session_file, [], window_id="@1")
+
+        copy = tmp_path / "copy.jsonl"
+        copy.write_text(history + _record("fresh"))
+        copy.replace(session_file)
+
+        with patch(
+            "ccgram.transcript_reader._prefix_digest",
+            wraps=transcript_reader._prefix_digest,
+        ) as full_digest:
+            messages: list = []
             await reader._process_session_file(
                 "sess", session_file, messages, window_id="@1"
             )
-            delivered.extend(msg.text for msg in messages)
-        assert digest.call_count == 0
+            await reader._process_session_file("sess", session_file, [], window_id="@1")
 
-    assert delivered == ["m0", "m1", "m2", "m3"]
+        assert [msg.text for msg in messages] == ["fresh"]
+        assert full_digest.call_count == 1
 
-
-async def test_rewrite_of_tail_marker_window_clamps_without_replay(
-    tmp_path,
-) -> None:
-    """A rewrite inside the tail-marker window must verify and clamp."""
-    history = "".join(
-        '{"type":"assistant","message":{"content":[{"type":"text","text":"h%d"}]}}\n'
-        % index
-        for index in range(5)
-    )
-    session_file = tmp_path / "transcript.jsonl"
-    session_file.write_text(history, newline="\n")
-
-    state = MonitorState(state_file=tmp_path / "monitor_state.json")
-    state.update_session(
-        TrackedSession(
-            session_id="sess",
-            file_path=str(session_file),
-            last_byte_offset=session_file.stat().st_size,
-        )
-    )
-    reader = TranscriptReader(state, IdleTracker())
-    with patch(
-        "ccgram.transcript_reader._resolve_provider_for_file",
-        return_value=_CLAUDE_PROVIDER,
-    ):
+    async def test_rewrite_inside_tail_marker_clamps_without_replay(
+        self, tmp_path
+    ) -> None:
+        history = _record("h0") * 5
+        session_file = tmp_path / "transcript.jsonl"
+        session_file.write_text(history)
+        reader, state = _tracked_reader(tmp_path, session_file, len(history.encode()))
         await reader._process_session_file("sess", session_file, [], window_id="@1")
 
-        session_file.write_text(history.replace('"h4"', '"h9"'), newline="\n")
-        reader._file_mtimes["sess"] = 0.0
+        session_file.write_text(history.replace("h0", "h1") + _record("after"))
 
-        messages = []
+        messages: list = []
         await reader._process_session_file(
             "sess", session_file, messages, window_id="@1"
         )
 
-    assert messages == []
-    tracked = state.get_session("sess")
-    assert tracked is not None
-    assert tracked.parsed_offset == session_file.stat().st_size
-    # The clamp re-baselines and the read keeps the result, but a clamped
-    # cycle is not a clean verification: the reset to the shortest interval
-    # must survive the cycle instead of being doubled away.
-    assert reader._prefix_verify["sess"][:2] == (0, 1)
+        assert messages == []
+        tracked = state.get_session("sess")
+        assert tracked is not None
+        assert tracked.parsed_offset == session_file.stat().st_size
 
-
-async def test_prefix_verify_backoff_resets_on_restart_and_generation_change(
-    tmp_path,
-) -> None:
-    """The digest backoff re-arms immediately after replacement or restart."""
-    history = "".join(
-        '{"type":"assistant","message":{"content":[{"type":"text","text":"h%d"}]}}\n'
-        % index
-        for index in range(5)
-    )
-    session_file = tmp_path / "transcript.jsonl"
-    session_file.write_text(history, newline="\n")
-
-    state = MonitorState(state_file=tmp_path / "monitor_state.json")
-    state.update_session(
-        TrackedSession(
-            session_id="sess",
-            file_path=str(session_file),
-            last_byte_offset=session_file.stat().st_size,
-        )
-    )
-    reader = TranscriptReader(state, IdleTracker())
-    with patch(
-        "ccgram.transcript_reader._resolve_provider_for_file",
-        return_value=_CLAUDE_PROVIDER,
-    ):
+    async def test_replacement_rebaselines_so_later_appends_deliver(
+        self, tmp_path
+    ) -> None:
+        history = _record("h0") * 5
+        session_file = tmp_path / "transcript.jsonl"
+        session_file.write_text(history)
+        reader, _ = _tracked_reader(tmp_path, session_file, len(history.encode()))
         await reader._process_session_file("sess", session_file, [], window_id="@1")
-        assert reader._prefix_verify["sess"][:2] == (0, 2)
-
-        for index in range(2):
-            line = (
-                '{"type":"assistant","message":{"content":[{"type":"text","text":"m%d"}]}}\n'
-                % index
-            )
-            with session_file.open("a") as transcript:
-                transcript.write(line)
-            await reader._process_session_file("sess", session_file, [], window_id="@1")
-        assert reader._prefix_verify["sess"][:2] == (2, 2)
 
         replacement = tmp_path / "replacement.jsonl"
-        replacement.write_text(
-            '{"type":"assistant","message":{"content":[{"type":"text","text":"x"}]}}\n',
-            newline="\n",
-        )
+        replacement.write_text(_record("other") * 3)
         replacement.replace(session_file)
-        messages = []
+        await reader._process_session_file("sess", session_file, [], window_id="@1")
+        with session_file.open("a") as transcript:
+            transcript.write(_record("live"))
+        messages: list = []
         await reader._process_session_file(
             "sess", session_file, messages, window_id="@1"
         )
 
-    assert messages == []
-    assert reader._prefix_verify["sess"][:2] == (0, 1)
+        assert [msg.text for msg in messages] == ["live"]
 
-    reader.clear_session("sess")
-    assert "sess" not in reader._prefix_verify
+    async def test_rewrite_is_detected_after_the_parse_position_rolled_back(
+        self, tmp_path
+    ) -> None:
+        history = _record("h0") * 5
+        session_file = tmp_path / "transcript.jsonl"
+        session_file.write_text(history)
+        reader, state = _tracked_reader(tmp_path, session_file, len(history.encode()))
+        await reader._process_session_file("sess", session_file, [], window_id="@1")
+        tracked = state.get_session("sess")
+        assert tracked is not None
+        tracked.parsed_offset = len(_record("h0").encode()) * 2  # rolled back
 
-
-async def test_idle_due_session_verifies_once_not_every_cycle(tmp_path) -> None:
-    """A due session verifies once per interval while idle, not per tick."""
-    history = "".join(
-        '{"type":"assistant","message":{"content":[{"type":"text","text":"h%d"}]}}\n'
-        % index
-        for index in range(5)
-    )
-    session_file = tmp_path / "transcript.jsonl"
-    session_file.write_text(history, newline="\n")
-
-    state = MonitorState(state_file=tmp_path / "monitor_state.json")
-    state.update_session(
-        TrackedSession(
-            session_id="sess",
-            file_path=str(session_file),
-            last_byte_offset=session_file.stat().st_size,
+        session_file.write_text(history.replace("h0", "h1") + _record("after"))
+        messages: list = []
+        await reader._process_session_file(
+            "sess", session_file, messages, window_id="@1"
         )
-    )
-    reader = TranscriptReader(state, IdleTracker())
-    real_digest = transcript_reader._prefix_digest
 
-    with (
-        patch(
-            "ccgram.transcript_reader._resolve_provider_for_file",
-            return_value=_CLAUDE_PROVIDER,
-        ),
-        patch("ccgram.transcript_reader._prefix_digest", wraps=real_digest) as digest,
-    ):
-        for index in range(2):
-            line = (
-                '{"type":"assistant","message":{"content":[{"type":"text","text":"m%d"}]}}\n'
-                % index
-            )
+        assert messages == []
+        assert tracked.parsed_offset == session_file.stat().st_size
+
+    def test_a_short_read_baseline_never_claims_unread_bytes(self, tmp_path) -> None:
+        session_file = tmp_path / "transcript.jsonl"
+        session_file.write_bytes(b"x" * 10)
+
+        size, _ = transcript_reader._advance_prefix(None, session_file, 25)
+
+        assert size == 10
+
+
+class TestParserRebuildOnActiveFile:
+    """The restart rebuild must finish on a transcript that keeps growing."""
+
+    def _setup(self, tmp_path, count=20):
+        history = "".join(_record(f"h{i}") for i in range(count))
+        session_file = tmp_path / "transcript.jsonl"
+        session_file.write_text(history)
+        reader, state = _tracked_reader(tmp_path, session_file, len(history.encode()))
+        return reader, state, session_file, history
+
+    async def test_rebuild_survives_a_concurrent_append(self, tmp_path) -> None:
+        reader, _, session_file, _ = self._setup(tmp_path)
+        await reader._process_session_file("sess", session_file, [], window_id="@1")
+        reader._parser_rebuild_pending.add("sess")
+        with session_file.open("a") as transcript:
+            transcript.write(_record("live"))
+        real = transcript_reader._replay_committed_prefix
+
+        def append_then_replay(*args, **kwargs):
             with session_file.open("a") as transcript:
-                transcript.write(line)
-            await reader._process_session_file("sess", session_file, [], window_id="@1")
+                transcript.write(_record("during"))
+            return real(*args, **kwargs)
+
+        with patch(
+            "ccgram.transcript_reader._replay_committed_prefix", append_then_replay
+        ):
+            messages: list = []
+            await reader._process_session_file(
+                "sess", session_file, messages, window_id="@1"
+            )
+
+        assert "sess" not in reader._parser_rebuild_pending
+        assert "sess" in reader._protocol_parser_states
+
+    async def test_rebuild_rejects_a_replaced_file(self, tmp_path) -> None:
+        reader, _, session_file, history = self._setup(tmp_path)
+        await reader._process_session_file("sess", session_file, [], window_id="@1")
+        stat = session_file.stat()
+        replacement = tmp_path / "replacement.jsonl"
+        replacement.write_text(history)
+        replacement.replace(session_file)
+
+        rebuilt = await reader._rebuild_committed_parser_context(
+            "sess", session_file, "claude", stat, supports_incremental_read=True
+        )
+
+        assert rebuilt is False
+
+    async def test_rebuild_rejects_a_file_truncated_during_the_read(
+        self, tmp_path
+    ) -> None:
+        _, _, session_file, history = self._setup(tmp_path)
+        stat = session_file.stat()
+        real_feed_read = transcript_reader.read_entries
+
+        def truncate_then_read(raw, provider):
+            session_file.write_text(history[:50])
+            return real_feed_read(raw, provider)
+
+        with patch("ccgram.transcript_reader.read_entries", truncate_then_read):
+            state = transcript_reader._replay_committed_prefix(
+                session_file,
+                "claude",
+                len(history.encode()),
+                (stat.st_dev, stat.st_ino),
+            )
+
+        assert state is None
+
+    async def test_chunked_rebuild_matches_a_whole_file_rebuild(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        count = 40
+        tool_use = (
+            '{"type":"assistant","message":{"content":[{"type":"tool_use",'
+            '"id":"t1","name":"Bash","input":{"command":"ls"}}]}}\n'
+        )
+        history = "".join(_record(f"h{i}") for i in range(count)) + tool_use
+        session_file = tmp_path / "transcript.jsonl"
+        session_file.write_text(history)
+        stat = session_file.stat()
+        generation = (stat.st_dev, stat.st_ino)
+        floor = len(history.encode())
+
+        whole = transcript_reader._replay_committed_prefix(
+            session_file, "claude", floor, generation
+        )
+        monkeypatch.setattr(transcript_reader, "_REBUILD_CHUNK_BYTES", 37)
+        chunked = transcript_reader._replay_committed_prefix(
+            session_file, "claude", floor, generation
+        )
+
+        assert whole is not None and chunked is not None
+        assert set(chunked.pending_tools) == set(whole.pending_tools) == {"t1"}
+
+    async def test_rebuild_stops_at_the_floor(self, tmp_path) -> None:
+        history = "".join(_record(f"h{i}") for i in range(10))
+        session_file = tmp_path / "transcript.jsonl"
+        session_file.write_text(history)
+        stat = session_file.stat()
+        seen: list[int] = []
+        real_parse = transcript_reader.parse_records
+
+        def spy(entries, provider_name, parser_state, **kwargs):
+            seen.extend(entry.offset for entry in entries)
+            return real_parse(entries, provider_name, parser_state, **kwargs)
+
+        floor = len(_record("h0").encode()) * 4
+        with patch("ccgram.transcript_reader.parse_records", spy):
+            transcript_reader._replay_committed_prefix(
+                session_file, "claude", floor, (stat.st_dev, stat.st_ino)
+            )
+
+        assert seen == [len(_record("h0").encode()) * i for i in range(4)]
+
+
+class TestLazyStartupBaseline:
+    """Construction must not hash transcripts; the first poll seeds them."""
+
+    def _tracked(self, tmp_path, count=3):
+        history = _record("h0") * 5
+        state = MonitorState(state_file=tmp_path / "monitor_state.json")
+        files = []
+        for index in range(count):
+            session_file = tmp_path / f"s{index}.jsonl"
+            session_file.write_text(history)
+            state.update_session(
+                TrackedSession(
+                    session_id=f"s{index}",
+                    file_path=str(session_file),
+                    last_byte_offset=len(history.encode()),
+                )
+            )
+            files.append(session_file)
+        return state, files, history
+
+    def test_construction_hashes_nothing(self, tmp_path) -> None:
+        state, _, _ = self._tracked(tmp_path)
+
+        with (
+            patch("ccgram.transcript_reader._hash_range") as hashed,
+            patch("ccgram.transcript_reader._prefix_digest") as digest,
+        ):
+            TranscriptReader(state, IdleTracker())
+
+        assert hashed.call_count == 0
         assert digest.call_count == 0
 
-        for _ in range(3):
-            await reader._process_session_file("sess", session_file, [], window_id="@1")
-        # The first idle cycle verifies the frozen prefix and extends the
-        # baseline, then doubles the interval; the rest defer.
-        assert digest.call_count == 2
+    async def test_first_poll_hashes_the_baseline_off_the_event_loop(
+        self, tmp_path
+    ) -> None:
+        state, files, _ = self._tracked(tmp_path, count=1)
+        reader = TranscriptReader(state, IdleTracker())
+        threads: list[threading.Thread] = []
+        real_range = transcript_reader._hash_range
+
+        def record_thread(*args, **kwargs):
+            threads.append(threading.current_thread())
+            return real_range(*args, **kwargs)
+
+        with patch("ccgram.transcript_reader._hash_range", record_thread):
+            await reader._process_session_file("s0", files[0], [], window_id="@1")
+
+        assert threads
+        assert all(thread is not threading.main_thread() for thread in threads)
+
+    async def test_replacement_before_the_first_poll_still_clamps(
+        self, tmp_path
+    ) -> None:
+        state, files, history = self._tracked(tmp_path, count=1)
+        reader = TranscriptReader(state, IdleTracker())
+        replacement = tmp_path / "replacement.jsonl"
+        replacement.write_text(_record("other") * 8)
+        replacement.replace(files[0])
+
+        messages: list = []
+        await reader._process_session_file("s0", files[0], messages, window_id="@1")
+
+        assert messages == []
+        tracked = state.get_session("s0")
+        assert tracked is not None
+        assert tracked.parsed_offset == files[0].stat().st_size
+
+    async def test_inode_change_after_seeding_is_still_verified_once(
+        self, tmp_path
+    ) -> None:
+        state, files, history = self._tracked(tmp_path, count=1)
+        reader = TranscriptReader(state, IdleTracker())
+        await reader._process_session_file("s0", files[0], [], window_id="@1")
+        copy = tmp_path / "copy.jsonl"
+        copy.write_text(history + _record("fresh"))
+        copy.replace(files[0])
+
+        messages: list = []
+        await reader._process_session_file("s0", files[0], messages, window_id="@1")
+
+        assert [msg.text for msg in messages] == ["fresh"]
 
 
-async def test_overdue_session_forces_verification_even_while_growing(
-    tmp_path,
-) -> None:
-    """Past the defer cap, growth cycles verify instead of deferring forever."""
-    history = (
-        '{"type":"assistant","message":{"content":[{"type":"text","text":"h0"}]}}\n'
+class TestDeferredParserRebuild:
+    """A restored session rebuilds parser context only when it has output to parse."""
+
+    _TOOL_USE = (
+        '{"type":"assistant","message":{"content":[{"type":"tool_use",'
+        '"id":"t1","name":"Bash","input":{"command":"ls"}}]}}\n'
     )
-    session_file = tmp_path / "transcript.jsonl"
-    session_file.write_text(history, newline="\n")
+    _TOOL_RESULT = (
+        '{"type":"user","message":{"content":[{"type":"tool_result",'
+        '"tool_use_id":"t1","content":"a\\nb\\nc\\nd"}]}}\n'
+    )
 
-    state = MonitorState(state_file=tmp_path / "monitor_state.json")
-    state.update_session(
-        TrackedSession(
-            session_id="sess",
-            file_path=str(session_file),
-            last_byte_offset=len(history.encode()),
+    def _restored(self, tmp_path, history: str):
+        session_file = tmp_path / "transcript.jsonl"
+        session_file.write_text(history)
+        return (
+            *_tracked_reader(tmp_path, session_file, len(history.encode())),
+            session_file,
         )
-    )
-    reader = TranscriptReader(state, IdleTracker())
-    reader._prefix_verify["sess"] = (
-        transcript_reader._PREFIX_VERIFY_CAP,
-        transcript_reader._PREFIX_VERIFY_CAP,
-        0.0,
-    )
-    real_digest = transcript_reader._prefix_digest
 
-    line = '{"type":"assistant","message":{"content":[{"type":"text","text":"m0"}]}}\n'
-    with (
-        patch(
-            "ccgram.transcript_reader._resolve_provider_for_file",
-            return_value=_CLAUDE_PROVIDER,
-        ),
-        patch("ccgram.transcript_reader._prefix_digest", wraps=real_digest) as digest,
-    ):
-        with session_file.open("a") as transcript:
-            transcript.write(line)
-        messages = []
+    async def _poll(self, reader, session_file) -> list:
+        messages: list = []
         await reader._process_session_file(
             "sess", session_file, messages, window_id="@1"
         )
-        assert digest.call_count >= 1
-        assert reader._prefix_verify["sess"][0] < transcript_reader._PREFIX_VERIFY_CAP
+        return messages
 
-    assert [msg.text for msg in messages] == ["m0"]
+    async def test_idle_restored_session_is_not_rebuilt(self, tmp_path) -> None:
+        reader, _, session_file = self._restored(tmp_path, _record("h0") * 20)
+
+        with patch(
+            "ccgram.transcript_reader._replay_committed_prefix",
+            wraps=transcript_reader._replay_committed_prefix,
+        ) as rebuild:
+            for _ in range(3):
+                assert await self._poll(reader, session_file) == []
+
+        assert rebuild.call_count == 0
+
+    async def test_first_output_after_restart_rebuilds_once(self, tmp_path) -> None:
+        reader, _, session_file = self._restored(tmp_path, _record("h0") * 20)
+        await self._poll(reader, session_file)
+
+        with patch(
+            "ccgram.transcript_reader._replay_committed_prefix",
+            wraps=transcript_reader._replay_committed_prefix,
+        ) as rebuild:
+            with session_file.open("a") as transcript:
+                transcript.write(_record("live"))
+            delivered = await self._poll(reader, session_file)
+            with session_file.open("a") as transcript:
+                transcript.write(_record("later"))
+            delivered += await self._poll(reader, session_file)
+
+        assert [msg.text for msg in delivered] == ["live", "later"]
+        assert rebuild.call_count == 1
+
+    async def test_deferred_rebuild_keeps_context_from_before_the_watermark(
+        self, tmp_path
+    ) -> None:
+        reader, _, session_file = self._restored(
+            tmp_path, _record("h0") * 3 + self._TOOL_USE
+        )
+        await self._poll(reader, session_file)
+        await self._poll(reader, session_file)
+
+        with session_file.open("a") as transcript:
+            transcript.write(self._TOOL_RESULT)
+        messages = await self._poll(reader, session_file)
+
+        results = [msg for msg in messages if msg.content_type == "tool_result"]
+        assert [msg.tool_name for msg in results] == ["Bash"]
 
 
-async def test_atomic_replacement_preserving_marker_clamps(tmp_path) -> None:
-    """A new inode keeping the verified prefix and marker but editing the gap clamps.
-
-    Review P1. The baseline must NOT cover consumed: appends since the
-    constructor snapshot grow the parse position past the digest, then an
-    atomic replacement preserves the verified prefix and the last 128
-    bytes while changing the middle and appends one unread line beyond.
-    The digest ran and matched its own range, the marker matches, the size
-    covers pos, yet nothing proved the gap: the dismissal must not fire on
-    generation evidence alone, and the clamp must swallow the unread line
-    as history.
-    """
-    base = '{"type":"user","message":{"content":[{"type":"text","text":"a"}]}}\n'
-    session_file = tmp_path / "t.jsonl"
-    session_file.write_text(base, newline="\n")
-    state = MonitorState(state_file=tmp_path / "m.json")
-    state.update_session(
-        TrackedSession(session_id="s", file_path=str(session_file), last_byte_offset=0)
-    )
-    reader = TranscriptReader(state, IdleTracker())
-    await reader._process_session_file("s", session_file, [], window_id="@1")
-    baseline = state.tracked_sessions["s"].parsed_offset
-
-    grow = (
+def _assistant_line(text: str) -> str:
+    return (
         '{"type":"assistant","message":{"content":[{"type":"text","text":"%s"}]}}\n'
-        % ("g" * 160)
+        % text
     )
-    with session_file.open("a") as fh:
-        fh.write(grow)
-    await reader._process_session_file("s", session_file, [], window_id="@1")
-    consumed = state.tracked_sessions["s"].parsed_offset
-    assert consumed > baseline
-    marker_bytes = transcript_reader._MARKER_BYTES
-    gap_len = (consumed - marker_bytes) - baseline
-    # The preserved tail window must start past the baseline: a shorter
-    # grow puts the fill inside the window and clamps through the ordinary
-    # marker-mismatch path, which the pre-fix code takes as well.
-    assert gap_len > 0
-
-    fresh = '{"type":"assistant","message":{"content":[{"type":"text","text":"tail-fresh"}]}}\n'
-    # Byte-exact by construction: text slicing would match the marker
-    # window only while every fixture byte is ASCII.
-    data = session_file.read_bytes()
-    replaced = tmp_path / "r.jsonl"
-    replaced.write_bytes(
-        data[:baseline]
-        + b"X" * gap_len
-        + data[consumed - marker_bytes :]
-        + fresh.encode()
-    )
-    os.replace(replaced, session_file)
-
-    messages: list = []
-    await reader._process_session_file("s", session_file, messages, window_id="@1")
-    # The discriminating observable: the pre-fix code dismisses the
-    # generation signal (marker, size, and digest all intact) and delivers
-    # the unread line; the clamp treats it as already-notified history.
-    assert messages == []
-    assert state.tracked_sessions["s"].parsed_offset >= session_file.stat().st_size
 
 
-async def test_stale_marker_mismatch_during_inplace_rewrite_is_not_an_append(
-    tmp_path,
+@pytest.mark.parametrize("failing_helper", ["_tail_marker", "_advance_prefix"])
+async def test_failed_commit_io_redelivers_unsent_entries_once(
+    tmp_path, monkeypatch, failing_helper: str
 ) -> None:
-    """A stale-offset marker mismatch during an in-place rewrite is not an append.
-
-    Review gate 2. The cached marker offset trails the parse position (the
-    post-clamp cache shape), so a mismatch there cannot set marker_changed,
-    but it did happen during a rewrite: only a marker that still MATCHES
-    may qualify the cycle as a verified append. The mid-read rewrite edits
-    consumed bytes inside the stale window, so the read must fall to the
-    consumed-prefix digest, fail it, and clamp instead of delivering the
-    concurrent entry as an append cycle.
-    """
-    history = "".join(
-        '{"type":"assistant","message":{"content":[{"type":"text","text":"h%d"}]}}\n'
-        % index
-        for index in range(6)
-    )
-    fresh = (
-        '{"type":"assistant","message":{"content":[{"type":"text","text":"fresh"}]}}\n'
-    )
-    session_file = tmp_path / "t.jsonl"
-    session_file.write_text(history, newline="\n")
-    state = MonitorState(state_file=tmp_path / "m.json")
-    state.update_session(
-        TrackedSession(session_id="s", file_path=str(session_file), last_byte_offset=0)
-    )
-    reader = TranscriptReader(state, IdleTracker())
-    await reader._process_session_file("s", session_file, [], window_id="@1")
-    pos = state.tracked_sessions["s"].parsed_offset
-    with session_file.open("a") as fh:
-        fh.write(fresh)
-    # Sentinel bytes no transcript content can match.
-    reader._file_markers["s"] = (pos - 64, b"stale-sentinel")
-
-    original_read = reader._read_new_lines
-    rewritten = False
-
-    async def rewrite_then_read(*args, **kwargs):
-        nonlocal rewritten
-        if not rewritten:
-            session_file.write_text(
-                session_file.read_text().replace('"h3"', '"hZ"', 1),
-                newline="\n",
-            )
-            rewritten = True
-        return await original_read(*args, **kwargs)
-
-    messages: list = []
-    t0 = time.monotonic()
-    with patch.object(reader, "_read_new_lines", side_effect=rewrite_then_read):
-        await reader._process_session_file("s", session_file, messages, window_id="@1")
-
-    assert messages == []
-    assert reader._prefix_verify["s"][:2] == (0, 1)
-    # The post-clamp reset must carry a real monotonic stamp, not the
-    # never-verified 0.0 sentinel: on a freshly booted host the sentinel
-    # would leave the idle deadline undue for the whole boot window.
-    assert reader._prefix_verify["s"][2] >= t0
-
-
-async def test_generation_dismissal_requires_a_digest_verdict(tmp_path) -> None:
-    """An OSError during the scheduled digest blocks the generation dismissal.
-
-    Review P1, OSError half. The marker matches and the cached baseline
-    covers every consumed byte, but the digest run raised: no verdict ran,
-    so a new inode must not be dismissed on metadata alone. Dropping the
-    prefix_checked conjunct would fire the dismissal and deliver the
-    unread line.
-    """
-    base = '{"type":"user","message":{"content":[{"type":"text","text":"a"}]}}\n'
-    session_file = tmp_path / "t.jsonl"
-    session_file.write_text(base, newline="\n")
-    state = MonitorState(state_file=tmp_path / "m.json")
-    state.update_session(
-        TrackedSession(session_id="s", file_path=str(session_file), last_byte_offset=0)
-    )
-    reader = TranscriptReader(state, IdleTracker())
-    await reader._process_session_file("s", session_file, [], window_id="@1")
-    baseline = state.tracked_sessions["s"].parsed_offset
-
-    grow = (
-        '{"type":"assistant","message":{"content":[{"type":"text","text":"%s"}]}}\n'
-        % ("g" * 160)
-    )
-    with session_file.open("a") as fh:
-        fh.write(grow)
-    # Drop the marker cache so the growth cycle cannot defer the scheduled
-    # digest: the clean verification extends the cached baseline over the
-    # gap, which is what would make the covered-range check alone pass.
-    reader._file_markers.pop("s", None)
-    await reader._process_session_file("s", session_file, [], window_id="@1")
-    consumed = state.tracked_sessions["s"].parsed_offset
-    marker_bytes = transcript_reader._MARKER_BYTES
-    gap_len = (consumed - marker_bytes) - baseline
-    assert gap_len > 0
-
-    fresh = '{"type":"assistant","message":{"content":[{"type":"text","text":"tail-fresh"}]}}\n'
-    data = session_file.read_bytes()
-    replaced = tmp_path / "r.jsonl"
-    replaced.write_bytes(
-        data[:baseline]
-        + b"X" * gap_len
-        + data[consumed - marker_bytes :]
-        + fresh.encode()
-    )
-    os.replace(replaced, session_file)
-
-    real_digest = transcript_reader._prefix_digest
-    raised = {"done": False}
-
-    def _raise_once(path, size):
-        if not raised["done"]:
-            raised["done"] = True
-            raise OSError("digest unavailable")
-        return real_digest(path, size)
-
-    messages: list = []
-    with patch("ccgram.transcript_reader._prefix_digest", side_effect=_raise_once):
-        await reader._process_session_file("s", session_file, messages, window_id="@1")
-
-    assert messages == []
-    assert state.tracked_sessions["s"].parsed_offset >= session_file.stat().st_size
-
-
-def test_idle_deadline_forces_verification(tmp_path) -> None:
-    """Quiet polls stop counting, so the monotonic deadline forces a digest.
-
-    Review P2: the stale-stamp branch is the one that must fire when the
-    growth-cycle counter sits far under its threshold.
-    """
-    session_file = tmp_path / "t.jsonl"
-    session_file.write_text("{}\n")
-    state = MonitorState(state_file=tmp_path / "m.json")
-    state.update_session(
-        TrackedSession(session_id="s", file_path=str(session_file), last_byte_offset=0)
-    )
-    reader = TranscriptReader(state, IdleTracker())
-    reader._prefix_verify["s"] = (
-        1,
-        32,
-        time.monotonic() - transcript_reader._PREFIX_VERIFY_MAX_IDLE_S - 1,
-    )
-    assert reader._prefix_verify_due("s") is True
-    reader._prefix_verify["s"] = (1, 32, time.monotonic())
-    assert reader._prefix_verify_due("s") is False
-
-
-async def test_identity_flip_after_probe_clamp_restores_the_baseline(
-    tmp_path, monkeypatch
-) -> None:
-    """A clamp observed during an identity flip must not bless the new file.
-
-    The probe clamps a replaced transcript and re-baselines the prefix at
-    the new EOF. When the provider observation flips right after the probe,
-    the rollback restores the parse offset; it must restore the baseline
-    too, or the next cycle dismisses the replacement against a baseline
-    nobody committed to and delivers the replaced file as new messages.
-    """
-    from ccgram.window_state_ports import identity_state
-
-    history = "".join(
-        '{"type":"assistant","message":{"content":[{"type":"text","text":"h%d"}]}}\n'
-        % index
-        for index in range(5)
-    )
+    """An OSError during commit must not let a later checkpoint skip entries."""
+    delivered = _assistant_line("a")
     session_file = tmp_path / "transcript.jsonl"
-    session_file.write_text(history, newline="\n")
-    state = MonitorState(state_file=tmp_path / "m.json")
-    state.update_session(
-        TrackedSession(session_id="s", file_path=str(session_file), last_byte_offset=0)
-    )
-    reader = TranscriptReader(state, IdleTracker())
-    await reader._process_session_file("s", session_file, [], window_id="@1")
-    pos = state.tracked_sessions["s"].parsed_offset
-    baseline = reader._file_prefixes["s"]
-    verify = reader._prefix_verify.get("s")
-
-    replaced = tmp_path / "r.jsonl"
-    replaced.write_text(
-        "".join(
-            '{"type":"assistant","message":{"content":[{"type":"text","text":"g%d"}]}}\n'
-            % index
-            for index in range(4)
-        ),
-        newline="\n",
-    )
-    os.replace(replaced, session_file)
-
-    calls = {"n": 0}
-
-    def flip_after_probe(window_id, provider_name):
-        calls["n"] += 1
-        # The entry gate accepts; the post-probe check is what flips.
-        return calls["n"] < 2
-
-    monkeypatch.setattr(
-        identity_state, "accepts_provider_observation", flip_after_probe
-    )
-    flipped: list = []
-    await reader._process_session_file("s", session_file, flipped, window_id="@1")
-    assert flipped == []
-    assert state.tracked_sessions["s"].parsed_offset == pos
-    assert reader._file_prefixes["s"] == baseline
-    assert reader._prefix_verify.get("s") == verify
-
-    # With identity stable again the next cycle re-judges the file from the
-    # OLD baseline: the replacement clamps instead of being dismissed and
-    # the replaced content is never delivered.
-    monkeypatch.setattr(
-        identity_state,
-        "accepts_provider_observation",
-        lambda window_id, provider_name: True,
-    )
-    messages: list = []
-    await reader._process_session_file("s", session_file, messages, window_id="@1")
-    assert messages == []
-    assert state.tracked_sessions["s"].parsed_offset >= session_file.stat().st_size
-
-
-async def test_missing_baseline_seeds_on_read_and_recovers_detection(
-    tmp_path,
-) -> None:
-    """A failed startup snapshot must not disable rewrite detection forever.
-
-    Review P1: with no cached prefix baseline the scheduled digest never
-    starts, and the clamp-only re-baseline means a healthy read never
-    creates one, so a rewrite outside the tail-marker window would stay
-    undetected for the process lifetime. The first committed read now
-    seeds the baseline at its parse position, and the next replacement
-    signal gets a digest verdict again.
-    """
-    history = "".join(
-        '{"type":"assistant","message":{"content":[{"type":"text","text":"h%d"}]}}\n'
-        % index
-        for index in range(5)
-    )
-    session_file = tmp_path / "t.jsonl"
-    session_file.write_text(history, newline="\n")
-    state = MonitorState(state_file=tmp_path / "m.json")
-    state.update_session(
-        TrackedSession(session_id="s", file_path=str(session_file), last_byte_offset=0)
-    )
-    reader = TranscriptReader(state, IdleTracker())
-    # The state a failed constructor snapshot leaves behind: no baseline.
-    reader._file_prefixes.pop("s", None)
-
-    messages: list = []
-    await reader._process_session_file("s", session_file, messages, window_id="@1")
-    assert len(messages) == 5
-    baseline = reader._file_prefixes.get("s")
-    pos = state.tracked_sessions["s"].parsed_offset
-    assert baseline is not None
-    assert baseline[0] == pos
-
-    # A rewrite inside the now-verified range but outside the tail-marker
-    # window, plus one unread line, with the schedule overdue so the growth
-    # cycle cannot defer the digest: without the seeded baseline the digest
-    # has no range to compare, the marker dismisses the signal, and the
-    # unread line is delivered as if nothing happened.
-    reader._prefix_verify["s"] = (
-        transcript_reader._PREFIX_VERIFY_CAP,
-        transcript_reader._PREFIX_VERIFY_CAP,
-        0.0,
-    )
-    fresh = '{"type":"assistant","message":{"content":[{"type":"text","text":"tail-fresh"}]}}\n'
     session_file.write_text(
-        session_file.read_text().replace('"h0"', '"hZ"', 1) + fresh, newline="\n"
+        delivered + _assistant_line("b") + _assistant_line("c"), newline="\n"
     )
-    clamped: list = []
-    await reader._process_session_file("s", session_file, clamped, window_id="@1")
-    assert clamped == []
-    assert state.tracked_sessions["s"].parsed_offset >= session_file.stat().st_size
-
-
-async def test_baseline_seed_failure_keeps_the_cycle_and_retries(tmp_path) -> None:
-    """A transient OSError during the seed keeps the commit and the retry.
-
-    The marker read already succeeded, so the cycle must deliver and store
-    its caches rather than abort; and the stored mtime must not gate the
-    retry away, or a quiet file never reaches the next commit and the
-    missing-baseline condition persists. The successful retry stamps the
-    verification schedule instead of re-hashing the same range.
-    """
-    history = "".join(
-        '{"type":"assistant","message":{"content":[{"type":"text","text":"h%d"}]}}\n'
-        % index
-        for index in range(5)
-    )
-    session_file = tmp_path / "t.jsonl"
-    session_file.write_text(history, newline="\n")
-    state = MonitorState(state_file=tmp_path / "m.json")
-    state.update_session(
-        TrackedSession(session_id="s", file_path=str(session_file), last_byte_offset=0)
-    )
-    reader = TranscriptReader(state, IdleTracker())
-    reader._file_prefixes.pop("s", None)
-
-    real_digest = transcript_reader._prefix_digest
-    raised = {"done": False}
-
-    def _raise_once(path, size):
-        if not raised["done"]:
-            raised["done"] = True
-            raise OSError("digest unavailable")
-        return real_digest(path, size)
-
-    messages: list = []
-    with patch("ccgram.transcript_reader._prefix_digest", side_effect=_raise_once):
-        await reader._process_session_file("s", session_file, messages, window_id="@1")
-        assert len(messages) == 5
-        assert "s" not in reader._file_prefixes
-        assert "s" not in reader._file_mtimes
-
-        # Quiet file, same patch context: the retry reaches the commit and
-        # the seed succeeds, stamping the schedule it just verified.
-        await reader._process_session_file("s", session_file, [], window_id="@1")
-        baseline = reader._file_prefixes.get("s")
-        assert baseline is not None
-        assert baseline[0] == state.tracked_sessions["s"].parsed_offset
-        assert reader._prefix_verify.get("s") is not None
-        assert reader._prefix_verify["s"][:2] == (0, 1)
-
-
-async def test_clamp_cycle_keeps_verify_schedule_at_shortest_interval(
-    tmp_path,
-) -> None:
-    """The cycle after a clamp must verify again, not inherit a doubled interval."""
-    history = "".join(
-        '{"type":"assistant","message":{"content":[{"type":"text","text":"h%d"}]}}\n'
-        % index
-        for index in range(5)
-    )
-    session_file = tmp_path / "transcript.jsonl"
-    session_file.write_text(history, newline="\n")
-
     state = MonitorState(state_file=tmp_path / "monitor_state.json")
     state.update_session(
         TrackedSession(
             session_id="sess",
             file_path=str(session_file),
-            last_byte_offset=session_file.stat().st_size,
+            last_byte_offset=len(delivered.encode()),
         )
     )
     reader = TranscriptReader(state, IdleTracker())
-    real_digest = transcript_reader._prefix_digest
-    with patch(
-        "ccgram.transcript_reader._resolve_provider_for_file",
-        return_value=_CLAUDE_PROVIDER,
-    ):
-        await reader._process_session_file("sess", session_file, [], window_id="@1")
+    real_helper = getattr(transcript_reader, failing_helper)
+    failures_left = [1]
 
-        session_file.write_text(history.replace('"h4"', '"h9"'), newline="\n")
-        reader._file_mtimes["sess"] = 0.0
-        await reader._process_session_file("sess", session_file, [], window_id="@1")
-        assert reader._prefix_verify["sess"][:2] == (0, 1)
+    def fail_once(*args, **kwargs):
+        if failures_left[0]:
+            failures_left[0] -= 1
+            raise OSError("transient read failure")
+        return real_helper(*args, **kwargs)
 
-        # One marker-verified append cycle counts up to (1, 1), so the next
-        # quiet cycle is due and must run the full verification. Had the
-        # clamp cycle's intact read doubled the interval to (0, 2), the state
-        # would sit at (1, 2) here and this cycle's digest would be skipped.
-        with session_file.open("a") as transcript:
-            transcript.write(
-                '{"type":"assistant","message":{"content":[{"type":"text","text":"m0"}]}}\n'
-            )
-        await reader._process_session_file("sess", session_file, [], window_id="@1")
-        assert reader._prefix_verify["sess"][:2] == (1, 1)
+    monkeypatch.setattr(transcript_reader, failing_helper, fail_once)
 
-        reader._file_mtimes["sess"] = 0.0
-        with patch(
-            "ccgram.transcript_reader._prefix_digest", wraps=real_digest
-        ) as digest:
-            await reader._process_session_file("sess", session_file, [], window_id="@1")
-        assert digest.call_count > 0
-        assert reader._prefix_verify["sess"][:2] == (0, 2)
+    failed_poll: list = []
+    await reader._process_session_file(
+        "sess", session_file, failed_poll, window_id="@1"
+    )
+    assert failed_poll == []
+
+    retry_poll: list = []
+    await reader._process_session_file("sess", session_file, retry_poll, window_id="@1")
+    assert [msg.text for msg in retry_poll] == ["b", "c"]
+
+    idle_poll: list = []
+    await reader._process_session_file("sess", session_file, idle_poll, window_id="@1")
+    assert idle_poll == []
+
+
+async def test_failed_marker_verification_redelivers_unsent_entries_once(
+    tmp_path, monkeypatch
+) -> None:
+    """An OSError while verifying the saved marker must not skip the read range."""
+    session_file = tmp_path / "transcript.jsonl"
+    session_file.write_text(_assistant_line("a"), newline="\n")
+    state = MonitorState(state_file=tmp_path / "monitor_state.json")
+    state.update_session(
+        TrackedSession(
+            session_id="sess", file_path=str(session_file), last_byte_offset=0
+        )
+    )
+    reader = TranscriptReader(state, IdleTracker())
+    first_poll: list = []
+    await reader._process_session_file("sess", session_file, first_poll, window_id="@1")
+    assert [msg.text for msg in first_poll] == ["a"]
+
+    with session_file.open("a", newline="\n") as handle:
+        handle.write(_assistant_line("b"))
+    real_marker = transcript_reader._tail_marker
+    io_failing = [True]
+
+    def fail_while_flagged(*args, **kwargs):
+        if io_failing[0]:
+            raise OSError("transient read failure")
+        return real_marker(*args, **kwargs)
+
+    monkeypatch.setattr(transcript_reader, "_tail_marker", fail_while_flagged)
+
+    failed_poll: list = []
+    await reader._process_session_file(
+        "sess", session_file, failed_poll, window_id="@1"
+    )
+    assert failed_poll == []
+
+    io_failing[0] = False
+    retry_poll: list = []
+    await reader._process_session_file("sess", session_file, retry_poll, window_id="@1")
+    assert [msg.text for msg in retry_poll] == ["b"]
+
+    idle_poll: list = []
+    await reader._process_session_file("sess", session_file, idle_poll, window_id="@1")
+    assert idle_poll == []
+
+
+def _gemini_line(entry_id: str, text: str) -> str:
+    return json.dumps({"id": entry_id, "type": "gemini", "content": text}) + "\n"
+
+
+def _gemini_session(tmp_path: Path) -> tuple[Path, TranscriptReader]:
+    session_file = tmp_path / ".gemini/tmp/proj/chats/session-1.jsonl"
+    session_file.parent.mkdir(parents=True)
+    session_file.write_text(_gemini_line("m1", "first"), newline="\n")
+    state = MonitorState(state_file=tmp_path / "monitor_state.json")
+    state.update_session(
+        TrackedSession(
+            session_id="sess", file_path=str(session_file), last_byte_offset=0
+        )
+    )
+    return session_file, TranscriptReader(state, IdleTracker())
+
+
+async def test_gemini_jsonl_transcript_is_read_incrementally(tmp_path) -> None:
+    session_file, reader = _gemini_session(tmp_path)
+
+    first: list = []
+    await reader._process_session_file("sess", session_file, first, window_id="@1")
+    assert [(m.text, m.provider_name) for m in first] == [("first", "gemini")]
+    tracked = reader._state.get_session("sess")
+    assert tracked is not None
+    assert tracked.parsed_offset == session_file.stat().st_size
+
+    with session_file.open("a", newline="\n") as handle:
+        handle.write(_gemini_line("m2", "second"))
+    second: list = []
+    await reader._process_session_file("sess", session_file, second, window_id="@1")
+    assert [m.text for m in second] == ["second"]
+
+    idle: list = []
+    await reader._process_session_file("sess", session_file, idle, window_id="@1")
+    assert idle == []
+
+
+async def test_gemini_failed_commit_redelivers_appended_entries_once(
+    tmp_path, monkeypatch
+) -> None:
+    session_file, reader = _gemini_session(tmp_path)
+    await reader._process_session_file("sess", session_file, [], window_id="@1")
+    with session_file.open("a", newline="\n") as handle:
+        handle.write(_gemini_line("m2", "second"))
+    real_prefix = transcript_reader._advance_prefix
+    failures_left = [1]
+
+    def fail_once(*args, **kwargs):
+        if failures_left[0]:
+            failures_left[0] -= 1
+            raise OSError("transient read failure")
+        return real_prefix(*args, **kwargs)
+
+    monkeypatch.setattr(transcript_reader, "_advance_prefix", fail_once)
+
+    failed: list = []
+    await reader._process_session_file("sess", session_file, failed, window_id="@1")
+    assert failed == []
+    retry: list = []
+    await reader._process_session_file("sess", session_file, retry, window_id="@1")
+    assert [m.text for m in retry] == ["second"]
+    idle: list = []
+    await reader._process_session_file("sess", session_file, idle, window_id="@1")
+    assert idle == []
+
+
+async def test_failed_commit_after_startup_boundary_jump_does_not_replay(
+    tmp_path, monkeypatch
+) -> None:
+    """The rollback target is the cursor the read started from, not the older one."""
+    history = _assistant_line("old1") + _assistant_line("old2")
+    session_file = tmp_path / "transcript.jsonl"
+    session_file.write_text(history, newline="\n")
+    stat = session_file.stat()
+    state = MonitorState(state_file=tmp_path / "monitor_state.json")
+    state.update_session(
+        TrackedSession(
+            session_id="sess", file_path=str(session_file), last_byte_offset=0
+        )
+    )
+    reader = TranscriptReader(state, IdleTracker())
+    # The file shrank below the size seen at startup: the reader skips to EOF.
+    reader._startup_file_boundaries["sess"] = _StartupBoundary(
+        size=stat.st_size + 1000, device=stat.st_dev, inode=stat.st_ino
+    )
+    real_prefix = transcript_reader._advance_prefix
+    failures_left = [1]
+
+    def fail_once(*args, **kwargs):
+        if failures_left[0]:
+            failures_left[0] -= 1
+            raise OSError("transient read failure")
+        return real_prefix(*args, **kwargs)
+
+    monkeypatch.setattr(transcript_reader, "_advance_prefix", fail_once)
+
+    for _ in range(3):
+        polled: list = []
+        await reader._process_session_file("sess", session_file, polled, window_id="@1")
+        assert polled == []
+    tracked = state.get_session("sess")
+    assert tracked is not None
+    assert tracked.parsed_offset == stat.st_size

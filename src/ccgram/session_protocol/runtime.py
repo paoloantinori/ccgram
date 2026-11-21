@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import fcntl
 import logging
 import os
@@ -21,6 +20,21 @@ from .service import LocalSessionService
 from .store import ProtocolStore
 
 logger = logging.getLogger(__name__)
+# Shutdown waits this long for the poll to honour cancellation. Past it, the store
+# and lock are closed anyway: a stuck shutdown would block every restart.
+CLOSE_TIMEOUT_SECONDS = 5.0
+
+
+def _raise_if_cancelling() -> None:
+    """Re-raise the error being handled when the poll was asked to stop.
+
+    A cancel can surface as another exception, such as a failure while a worker
+    unwinds. Swallowing it would leave the cancel request consumed and the loop
+    running.
+    """
+    task = asyncio.current_task()
+    if task is not None and task.cancelling():
+        raise
 
 
 # Bound on per-event drain retries: a transient source flap recovers
@@ -68,58 +82,84 @@ class ProtocolRuntime:
                 "Protocol hook queue full; dropped hook evidence, deferral rolled back"
             )
 
+    async def _drain_hook_event(
+        self, event: HookEvent, sessions: list[str], attempt: int, prefix: str
+    ) -> bool:
+        """Observe one queued hook; returns True when the drain pass breaks.
+
+        Every defer is balanced by exactly one resolve, whatever the
+        observation outcome.
+        """
+        try:
+            await self.service.observe_hook(event, prefix)
+        except ProtocolError, OSError:
+            # ProtocolError covers both a transient source
+            # flap and a permanent per-event failure (an
+            # unreadable transcript raises the same 503), so
+            # transience cannot be decided by type: retry a
+            # bounded number of cycles, then drop the event
+            # with its deferral released rather than churn at
+            # 1 Hz on a slot forever.
+            if attempt + 1 >= _DRAIN_RETRY_MAX:
+                self.service.resolve_hook(sessions)
+                logger.warning(
+                    "Dropping hook evidence for %s after %d failed observations",
+                    event.event_type,
+                    _DRAIN_RETRY_MAX,
+                    exc_info=True,
+                )
+                return False
+            logger.warning(
+                "Hook observation failed; retrying next cycle (attempt %d/%d)",
+                attempt + 1,
+                _DRAIN_RETRY_MAX,
+                exc_info=True,
+            )
+            try:
+                self.hooks.put_nowait((event, sessions, attempt + 1))
+            except asyncio.QueueFull:
+                self.service.resolve_hook(sessions)
+                logger.error(
+                    "Protocol hook queue full on retry; dropped "
+                    "hook evidence, deferral rolled back"
+                )
+            return True
+        except Exception:  # noqa: BLE001
+            # A per-event failure (e.g. malformed transcript
+            # data) must not kill the drain loop (task-65):
+            # log and keep draining.
+            logger.warning("Hook observation failed", exc_info=True)
+        self.service.resolve_hook(sessions)
+        return False
+
     async def poll(self, prefix: str) -> None:
+        unavailable = False
         while True:
             try:
                 await self.service.refresh()
+                if unavailable:
+                    unavailable = False
+                    logger.info("Session protocol source recovered")
                 while not self.hooks.empty():
                     event, sessions, attempt = self.hooks.get_nowait()
-                    try:
-                        await self.service.observe_hook(event, prefix)
-                    except ProtocolError, OSError:
-                        # ProtocolError covers both a transient source
-                        # flap and a permanent per-event failure (an
-                        # unreadable transcript raises the same 503), so
-                        # transience cannot be decided by type: retry a
-                        # bounded number of cycles, then drop the event
-                        # with its deferral released rather than churn at
-                        # 1 Hz on a slot forever.
-                        if attempt + 1 >= _DRAIN_RETRY_MAX:
-                            self.service.resolve_hook(sessions)
-                            logger.warning(
-                                "Dropping hook evidence for %s after %d "
-                                "failed observations",
-                                event.event_type,
-                                _DRAIN_RETRY_MAX,
-                                exc_info=True,
-                            )
-                            continue
-                        logger.warning(
-                            "Hook observation failed; retrying next cycle "
-                            "(attempt %d/%d)",
-                            attempt + 1,
-                            _DRAIN_RETRY_MAX,
-                            exc_info=True,
-                        )
-                        try:
-                            self.hooks.put_nowait((event, sessions, attempt + 1))
-                        except asyncio.QueueFull:
-                            self.service.resolve_hook(sessions)
-                            logger.error(
-                                "Protocol hook queue full on retry; dropped "
-                                "hook evidence, deferral rolled back"
-                            )
+                    if await self._drain_hook_event(event, sessions, attempt, prefix):
                         break
-                    except Exception:  # noqa: BLE001
-                        # A per-event failure (e.g. malformed transcript
-                        # data) must not kill the drain loop (task-65):
-                        # log and keep draining.
-                        logger.warning("Hook observation failed", exc_info=True)
-                    # Every defer is balanced by exactly one resolve,
-                    # whatever the observation outcome.
-                    self.service.resolve_hook(sessions)
-            except ProtocolError, OSError:
-                logger.warning("Session protocol source unavailable", exc_info=True)
+            except (ProtocolError, OSError) as exc:
+                _raise_if_cancelling()
+                # A multiplexer that is briefly unreachable or restarting is
+                # expected, and the next pass retries. Log the incident's start
+                # and end instead of one traceback per second: a sustained
+                # outage buried real errors under thousands of identical stacks.
+                if not unavailable:
+                    unavailable = True
+                    logger.warning(
+                        "Session protocol source unavailable: %s", exc, exc_info=True
+                    )
+            except Exception:
+                _raise_if_cancelling()
+                # Never stop the shared poll: an unexpected error is logged and the
+                # next pass retries every session.
+                logger.exception("Session protocol poll failed; retrying")
             await asyncio.sleep(1)
 
     async def close(self) -> None:
@@ -130,8 +170,19 @@ class ProtocolRuntime:
             try:
                 if self.task is not None:
                     self.task.cancel()
-                    with contextlib.suppress(asyncio.CancelledError):
-                        await self.task
+                    done, _ = await asyncio.wait(
+                        {self.task}, timeout=CLOSE_TIMEOUT_SECONDS
+                    )
+                    if not done:
+                        logger.error(
+                            "Session protocol poll did not stop within %ss; closing anyway",
+                            CLOSE_TIMEOUT_SECONDS,
+                        )
+                    elif not self.task.cancelled() and self.task.exception():
+                        logger.error(
+                            "Session protocol poll ended with an error",
+                            exc_info=self.task.exception(),
+                        )
             finally:
                 self.store.close()
                 self.lock.close()

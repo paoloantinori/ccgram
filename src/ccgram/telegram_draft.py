@@ -19,7 +19,8 @@ from telegram import Bot, InlineKeyboardMarkup, Message
 
 from telegram.error import BadRequest, NetworkError, RetryAfter, TelegramError, TimedOut
 
-from .telegram_client import audit_send
+from .telegram_client import DeliveryWithdrawnError, audit_send, check_delivery
+
 from .telegram_rate_limiter import retry_after_seconds
 from .utils import log_throttled
 
@@ -278,6 +279,7 @@ class DraftStream:
         await self._cancel_pending_flush()
         if self._mode == DRAFT_LEGACY and self._message_id is not None:
             try:
+                check_delivery()
                 await self._bot.delete_message(
                     chat_id=self._chat_id, message_id=self._message_id
                 )
@@ -360,6 +362,7 @@ class DraftStream:
         )
 
     async def _start_legacy(self) -> None:
+        check_delivery()
         message = await self._bot.send_message(
             chat_id=self._chat_id,
             text=self.text,
@@ -413,6 +416,8 @@ class DraftStream:
             raise
         except TelegramError as exc:
             logger.warning("DraftStream trailing update failed: %s", exc)
+        except DeliveryWithdrawnError:
+            self._closed = True
         finally:
             self._pending_flush = None
         if retry_delay is not None and not self._closed:
@@ -453,6 +458,7 @@ class DraftStream:
         return None
 
     async def _send_draft(self) -> None:
+        check_delivery()
         """Call PTB's typed method, with an escape hatch for older PTB."""
         payload = self._draft_kwargs()
         send_draft = getattr(self._bot, "send_message_draft", None)
@@ -463,6 +469,7 @@ class DraftStream:
 
     async def _send_final_message(self) -> None:
         try:
+            check_delivery()
             message = await self._bot.send_message(
                 chat_id=self._chat_id,
                 text=self.text,
@@ -483,6 +490,7 @@ class DraftStream:
         if markup is None:
             markup = InlineKeyboardMarkup([])
         try:
+            check_delivery()
             await self._bot.edit_message_text(
                 chat_id=self._chat_id,
                 message_id=self._message_id,
@@ -498,6 +506,7 @@ class DraftStream:
         except RetryAfter as exc:
             await asyncio.sleep(retry_after_seconds(exc) + 1)
             try:
+                check_delivery()
                 await self._bot.edit_message_text(
                     chat_id=self._chat_id,
                     message_id=self._message_id,
