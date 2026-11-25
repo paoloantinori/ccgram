@@ -23,3 +23,20 @@ Status: open (contenitore dei rilievi accettati e rinviati, tutti documentati ne
 ## Nota dipartite
 
 - Il tag merge/pre-425 e' stato sostituito dal branch archive/pre-425 (il tag rompeva hatch-vcs). Rollback del merge: revert -m 1 di fd772997 + revert dei commit di follow-up, poi revert-the-revert al prossimo merge.
+
+
+## Osservazione di campo 2026-11-25 (4 giorni post-merge)
+
+- Entrambe le sorveglianze 30-min post-deploy: scadute senza eventi.
+- bird: cluster di 4 restart il 24 nov ~14:00 causato dal riavvio della
+  sessione utente/systemd (istanza 1653->1934; traceback PTB di rete al
+  boot), NON dal codice del merge; stabile dalle 14:01 del 24.
+- bird: 6 avvisi "Delivery wedge suspected" (4 il 25 pomeriggio) su
+  finestre herdr durante burst di attivita' degli agenti: gap 400-700 KB
+  oltre la grace di 300 s mentre la coda drena entro i rate limit;
+  tutte auto-risolte, le finestre consegnavano minuti dopo. Candidato
+  tuning: scalare la grace con la dimensione del gap, o non avvisare
+  quando la coda sta drenando attivamente (send ok recenti).
+- Mac: 22 traceback in 4 giorni = 17 log di inizio outage ProtocolError
+  (per design: uno per inizio outage, non al secondo) + 3 di rete PTB +
+  2 singoli; 0 wedge; 8732 consegne; un restart il 23 nov 18:49.
